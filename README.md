@@ -1,5 +1,5 @@
 | Supported Targets | ESP32-P4 |
-Manipulandum Task
+**Manipulandum Task**
 
 This task is hosted on an ESP32-P4 Function EV Board.
 To use
