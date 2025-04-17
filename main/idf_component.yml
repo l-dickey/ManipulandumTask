@@ -1,0 +1,4 @@
+dependencies:
+  espressif/esp_lcd_ek79007: ^0.1.0
+  lvgl/lvgl: ^9.0.0
+  espressif/esp_codec_dev: '*'
