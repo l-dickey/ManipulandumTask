@@ -16,16 +16,14 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "font/lv_font.h"
 
 // Define our GPIO Pins for use
 #define GPIO_REWARD_SIGNAL   3 // GPIO pin connected to the syringe pump
-#define GPIO_STATE_0         4 // GPIO pin for 8 bit encoding
-#define GPIO_STATE_1         5 // GPIO pin for 8 bit encoding
-#define GPIO_STATE_2         6 // GPIO pin for 8 bit encoding
+#define GPIO_EVENT_PIN        4 // GPIO pin for 8 bit encoding
 
-#define GPIO_OUTPUT_PIN_MASK ((1ULL<<GPIO_STATE_0) | (1ULL<<GPIO_STATE_1) | \
-                             (1ULL<<GPIO_STATE_2) | (1ULL<<GPIO_REWARD_SIGNAL)) // make the pins outputs
+#define GPIO_OUTPUT_PIN_MASK ((1ULL<<GPIO_EVENT_PIN) |(1ULL<<GPIO_REWARD_SIGNAL)) // make the pins outputs
 
 // Define our mapping parameters
 #define ENCODER_MAX_RANGE    500      // Maximum encoder count for lever range
@@ -80,15 +78,24 @@ typedef enum {
     TRIAL_RESET      // Reset lever to center for next trial
 } trial_state_t;
 
-const uint8_t STATE_ENCODINGS[8][3] = { // each state can be called in the state machine to output the state via DAC board
-    {0,0,0}, // TRIAL_INIT
-    {0,0,1}, // TRIAL_CUE
-    {0,1,0}, // TRIAL_SETUP
-    {0,1,1}, // TRIAL_ACTIVE
-    {1,0,0}, // TRIAL_COMPLETE
-    {1,0,1}, // REWARD_PERIOD
-    {1,1,0}, // NON_REWARD_PERIOD
-    {1,1,1}  // TRIAL_RESET
+typedef enum {
+    EVT_TRIAL_START,
+    EVT_CUE,
+    EVT_TRIAL_ACTIVE,
+    EVT_TRIAL_END,
+    EVT_REWARD,
+    EVT_NON_REWARD,
+    EVT_TRIAL_RESET
+} event_type_t;
+
+static const uint32_t EVENT_WIDTH_US[] = {
+    [EVT_TRIAL_START]   =   100,
+    [EVT_CUE]           =   175,
+    [EVT_TRIAL_ACTIVE]  =   225,
+    [EVT_TRIAL_END]     =   300,
+    [EVT_REWARD]        =   375,
+    [EVT_NON_REWARD]    =   425,
+    [EVT_TRIAL_RESET]   =   500
 };
 
 // Condition type for the trial
@@ -148,6 +155,8 @@ void ui_update_task(void *pvParameters);
 void trial_state_task(void *pvParameters);
 void create_lever_ui(lv_display_t *display);
 void play_tone(uint32_t tone_frequency, uint32_t duration_ms);
+static inline void pulse_event_us(uint32_t width_us);
+static void log_and_pulse(event_type_t evt, int trial_num);
 void set_motor_position(int32_t position);
 void start_animation_to_position(int32_t position);
 static void animation_callback(void *var, int32_t value);
@@ -169,15 +178,10 @@ static esp_err_t setup_gpio(void) { // set up the GPIO pins according to the GPI
     return gpio_config(&io_conf);
 }
 
-// Set State Encodings
-static void set_state_pins(trial_state_t state) {
-    gpio_set_level(GPIO_STATE_0, STATE_ENCODINGS[state][0]);
-    gpio_set_level(GPIO_STATE_1, STATE_ENCODINGS[state][1]);
-    gpio_set_level(GPIO_STATE_2, STATE_ENCODINGS[state][2]);
-    ESP_LOGI(TAG, "State changed to: %d [%d%d%d]", state, 
-             STATE_ENCODINGS[state][0],
-             STATE_ENCODINGS[state][1],
-             STATE_ENCODINGS[state][2]);
+static inline void pulse_event_us(uint32_t width_us) {
+    gpio_set_level(GPIO_EVENT_PIN, 1);
+    esp_rom_delay_us(width_us);
+    gpio_set_level(GPIO_EVENT_PIN, 0);
 }
 
 
@@ -285,6 +289,31 @@ bool configure_session() {
     return true;
 }
 
+static void log_and_pulse(event_type_t evt, int trial_num) {
+    uint64_t t_us = esp_timer_get_time();
+
+    const char *evt_name =
+        (evt==EVT_TRIAL_START)   ? "START"       :
+        (evt==EVT_CUE)           ? "CUE"         :
+        (evt==EVT_TRIAL_ACTIVE)  ? "ACTIVE"      :
+        (evt==EVT_TRIAL_END)     ? "END"         :
+        (evt==EVT_REWARD)        ? "REWARD"      :
+        (evt==EVT_NON_REWARD)    ? "NON_REWARD"  :
+        (evt==EVT_TRIAL_RESET)   ? "RESET"       : "UNKNOWN";
+
+    if (evt == EVT_CUE) {
+        const char *color = session.reward_config.reward_color_is_green
+                            ? "GREEN" : "PURPLE";
+        printf("EVENT,%s,%d,%s,%" PRIu64 "\n",
+               evt_name, trial_num, color, t_us);
+    } else {
+        printf("EVENT,%s,%d,%" PRIu64 "\n",
+               evt_name, trial_num, t_us);
+    }
+
+    pulse_event_us(EVENT_WIDTH_US[evt]);
+}
+
 //----------------------
 // Check collision between two circles
 bool check_circle_collision(int32_t x1, int32_t y1, int32_t r1, int32_t x2, int32_t y2, int32_t r2) {
@@ -389,9 +418,9 @@ void encoder_read_task(void *pvParameters) {
         
         // --- STREAM OVER UART ---
         // Use microsecond timer / 1000 for ms
-        uint32_t ts = esp_timer_get_time() / 1000;
+        //uint32_t ts = esp_timer_get_time() / 1000;
         // Print as: timestamp_ms,encoder_count\n
-        printf("%" PRIu32 ",%" PRId32 "\n", ts, encoder_value);
+        //printf("%" PRIu32 ",%" PRId32 "\n", ts, encoder_value);
 
         // static int log_counter = 0; // uncomment for debugging
         // if (++log_counter >= 100) {  // Reduced logging frequency
@@ -451,7 +480,7 @@ void set_condition_circle_visibility(bool show_push, bool show_pull) {
             lv_obj_add_flag(condition_circle_pull, LV_OBJ_FLAG_HIDDEN);
         }
         
-        ESP_LOGI(TAG, "Visibility set: Push=%d, Pull=%d", show_push, show_pull);
+        // ESP_LOGI(TAG, "Visibility set: Push=%d, Pull=%d", show_push, show_pull); // uncomment for debugging
         lvgl_unlock();
     } else {
         ESP_LOGE(TAG, "Failed to acquire LVGL mutex in set_condition_circle_visibility");
@@ -484,9 +513,9 @@ void update_reward_styles() {
         // The active style should match the reward color for highlighting when correct
         lv_style_set_bg_color(&condition_active_style, reward_color);
         
-        ESP_LOGI(TAG, "Reward styles updated: Push=%s, Pull=%s", 
-                (session.reward_config.reward_is_push) ? "Reward" : "Non-reward",
-                (session.reward_config.reward_is_push) ? "Non-reward" : "Reward");
+        // ESP_LOGI(TAG, "Reward styles updated: Push=%s, Pull=%s", // uncomment for d3ebugging
+        //         (session.reward_config.reward_is_push) ? "Reward" : "Non-reward",
+        //         (session.reward_config.reward_is_push) ? "Non-reward" : "Reward");
         
         lvgl_unlock();
     } else {
@@ -724,18 +753,12 @@ void trial_state_task(void *pvParameters) {
     
     trial_state = TRIAL_INIT;
     state_start_time = xTaskGetTickCount();
-    set_state_pins(trial_state);  // Set initial state encoding
+    
     
     while (1) {
         switch(trial_state) {
             case TRIAL_INIT:
-                { // sends out signal for trial start for encoder counts
-                    uint64_t t_us = esp_timer_get_time();  
-                    // EVENT,TYPE,trial_number,timestamp_us
-                    printf("EVENT,START,%d,%" PRIu64 "\n",
-                        session.current_trial,
-                        t_us);
-                }
+                log_and_pulse(EVT_TRIAL_START,session.current_trial);
                 // ESP_LOGI(TAG, "TRIAL_INIT: Resetting lever and hiding condition circles"); // uncomment for debugging
                 // Hide both circles
                 set_condition_circle_visibility(false, false);
@@ -758,17 +781,15 @@ void trial_state_task(void *pvParameters) {
                 }
                 trial_state = TRIAL_CUE;
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
                 break;
                 
             case TRIAL_CUE:
                 // Generate the trial condition from random numbers.
                 // Set the cued condition based solely on the reward configuration.
                 current_condition = session.reward_config.reward_is_push ? CONDITION_PUSH : CONDITION_PULL;
-                ESP_LOGI(TAG, "TRIAL_CUE: Cued condition is: %s",
-                        (current_condition == CONDITION_PUSH) ? "PUSH" : "PULL");
-
-                         
+                // ESP_LOGI(TAG, "TRIAL_CUE: Cued condition is: %s", // unciomment for debugging
+                //         (current_condition == CONDITION_PUSH) ? "PUSH" : "PULL");
+                                         
                 // In this session-level design, the rewarded condition is fixed.
                 // Display only the reward circle as the cue.
                 if (session.reward_config.reward_is_push) {
@@ -776,9 +797,11 @@ void trial_state_task(void *pvParameters) {
                     // Display the push circle as cue.
                     set_condition_circle_visibility(true, false);
                     play_tone(440, 1000);
+                    log_and_pulse(EVT_CUE,session.current_trial);
                 } else {
                     // Reward is assigned to the pull circle.
                     set_condition_circle_visibility(false, true);
+                    log_and_pulse(EVT_CUE,session.current_trial);
                     play_tone(440, 1000);
                 }
                 vTaskDelay(pdMS_TO_TICKS(1000));  // Cue visible for 1 second
@@ -789,7 +812,6 @@ void trial_state_task(void *pvParameters) {
                 vTaskDelay(pdMS_TO_TICKS(500));  // Blank phase of 500ms
                 trial_state = TRIAL_SETUP;
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
                 break;
                 
             case TRIAL_SETUP:
@@ -808,10 +830,11 @@ void trial_state_task(void *pvParameters) {
                 
                 trial_state = TRIAL_ACTIVE;
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
+                log_and_pulse(EVT_TRIAL_ACTIVE,session.current_trial); // call here and not in ac tive other wise it will pulse multiple times
                 break;
                 
             case TRIAL_ACTIVE: {
+                
                 int32_t encoder_val = 0;
                 if (encoder_mutex != NULL) {
                     xSemaphoreTake(encoder_mutex, portMAX_DELAY);
@@ -844,14 +867,14 @@ void trial_state_task(void *pvParameters) {
                     ESP_LOGI(TAG, "TRIAL_ACTIVE: PUSH collision detected: %s", success ? "CORRECT" : "INCORRECT");
                     trial_state = TRIAL_COMPLETE;
                     state_start_time = xTaskGetTickCount();
-                    set_state_pins(trial_state);  // Update state pins
+                    
                 } else if (pull_collision) {
                     success = (current_condition == CONDITION_PULL);
                     trial_success = success;
                     ESP_LOGI(TAG, "TRIAL_ACTIVE: PULL collision detected: %s", success ? "CORRECT" : "INCORRECT");
                     trial_state = TRIAL_COMPLETE;
                     state_start_time = xTaskGetTickCount();
-                    set_state_pins(trial_state);  // Update state pins
+                    
                 }
                 
                 // Safety: if encoder is out-of-bounds, reset the trial.
@@ -859,7 +882,7 @@ void trial_state_task(void *pvParameters) {
                     ESP_LOGW(TAG, "Encoder out-of-bounds (%" PRId32 "), resetting trial", encoder_val);
                     trial_state = TRIAL_RESET;
                     state_start_time = xTaskGetTickCount();
-                    set_state_pins(trial_state);  // Update state pins
+                    
                 }
             }
                 vTaskDelay(pdMS_TO_TICKS(STATE_TASK_PERIOD));
@@ -869,18 +892,20 @@ void trial_state_task(void *pvParameters) {
                 // Show the outcome on screen.
                 if (trial_success) {
                     ESP_LOGI(TAG, "TRIAL_COMPLETE: Correct response");
-                    printf("cor\n");
+                    // printf("cor\n");
                     // Highlight the correct condition circle.
                     highlight_condition_circle(current_condition, true);
+                    log_and_pulse(EVT_REWARD, session.current_trial);
                     trial_state = REWARD_PERIOD;  // Move to reward period
                 } else {
                     ESP_LOGI(TAG, "TRIAL_COMPLETE: Incorrect response");
-                    printf("inc\n");
+                    // printf("inc\n");
                     highlight_condition_circle(current_condition, true);
+                    log_and_pulse(EVT_NON_REWARD, session.current_trial);
                     trial_state = NON_REWARD_PERIOD;  // Move to non-reward period
                 }
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
+                
                 vTaskDelay(pdMS_TO_TICKS(1500));  // Keep result visible for 1.5 seconds
                 // Reset highlighting.
                 highlight_condition_circle(CONDITION_PUSH, false);
@@ -894,15 +919,10 @@ void trial_state_task(void *pvParameters) {
                 gpio_set_level(GPIO_REWARD_SIGNAL, 1);  // Activate reward signal
                 vTaskDelay(pdMS_TO_TICKS(REWARD_DURATION_MS));
                 gpio_set_level(GPIO_REWARD_SIGNAL, 0);  // Turn off reward signal
-                { // send UART to PC log for end of trial
-                    uint64_t t_us = esp_timer_get_time();
-                    printf("EVENT,END,%d,%" PRIu64 "\n",
-                           session.current_trial,
-                           t_us);
-                }
+                
                 trial_state = TRIAL_RESET;
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
+                
                 break;
             
             case NON_REWARD_PERIOD:
@@ -910,13 +930,7 @@ void trial_state_task(void *pvParameters) {
                 vTaskDelay(pdMS_TO_TICKS(REWARD_DURATION_MS));  // Same delay as reward period
                 trial_state = TRIAL_RESET;
                 state_start_time = xTaskGetTickCount();
-                { // send UART to PC log for end of trial
-                    uint64_t t_us = esp_timer_get_time();
-                    printf("EVENT,END,%d,%" PRIu64 "\n",
-                           session.current_trial,
-                           t_us);
-                }
-                set_state_pins(trial_state);  // Update state pins
+                
                 break;
                 
             case TRIAL_RESET:
@@ -928,14 +942,14 @@ void trial_state_task(void *pvParameters) {
                 trial_state = TRIAL_INIT;
                 state_start_time = xTaskGetTickCount();
 
-                set_state_pins(trial_state);  // Update state pins
+                
                 break;
                 
             default:
                 ESP_LOGE(TAG, "Unknown trial state; resetting trial");
                 trial_state = TRIAL_INIT;
                 state_start_time = xTaskGetTickCount();
-                set_state_pins(trial_state);  // Update state pins
+                
                 break;
         }
         
@@ -945,7 +959,7 @@ void trial_state_task(void *pvParameters) {
             ESP_LOGW(TAG, "State stuck for too long in state %d; resetting trial", trial_state);
             trial_state = TRIAL_INIT;
             state_start_time = current_time;
-            set_state_pins(trial_state);  // Update state pins
+            
         }
         
         vTaskDelay(pdMS_TO_TICKS(STATE_TASK_PERIOD));
@@ -956,6 +970,13 @@ void trial_state_task(void *pvParameters) {
 // Main application entry point
 void app_main(void) {
     ESP_LOGI(TAG, "Starting lever test application");
+    // Only keep ERROR+ for LEDC; similarly you can mute any tag you like.
+    esp_log_level_set("ledc", ESP_LOG_ERROR);
+    // If you want to mute all other modules except your TAG:
+    esp_log_level_set("*", ESP_LOG_ERROR);
+    // Then re-enable your task’s TAG:
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+
     
     // Initialize UART for motor communication
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
