@@ -313,7 +313,7 @@ void read_mcp(uint8_t command, uint8_t* receive_buffer, uint8_t length){
 void reset_position(){
 
     update_PID(600, 0.0, 0, 200, 10, -5000, 5000);
-    set_position(800,50, 2000, 0, 1);
+    set_position(800,100, 2000, 0, 1);
 
 }
 

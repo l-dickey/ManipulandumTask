@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "lvgl.h"
+#include "lv_conf.h"
 #include "audio_pwm.c"
 #include "graphics.h"
 #include "mcpcommands.c"
@@ -28,7 +29,7 @@
 #define GPIO_OUTPUT_PIN_MASK ((1ULL<<GPIO_EVENT_PIN) |(1ULL<<GPIO_REWARD_SIGNAL)) // make the pins outputs
 
 // Define our mapping parameters
-#define ENCODER_MAX_RANGE    500      // Maximum encoder count for lever range
+#define ENCODER_MAX_RANGE    200      // Maximum encoder count for lever range
 #define SCREEN_WIDTH         1024     // Screen width (pixels)
 #define SCREEN_HEIGHT        600      // Screen height (pixels)
 #define INDICATOR_SIZE       30       // Size of the indicator circle (pixels)
@@ -37,7 +38,7 @@
 #define INDICATOR_Y_POS      (SCREEN_HEIGHT / 2) // Vertical center position
 
 // Condition circle positions (offset from center by approximately 200 encoder counts)
-#define CONDITION_OFFSET     200      // ~200 encoder counts for condition circles
+#define CONDITION_OFFSET     50      // ~200 encoder counts for condition circles
 #define CONDITION_SCREEN_OFFSET ((CONDITION_OFFSET * (SCREEN_WIDTH / 2 - INDICATOR_SIZE)) / ENCODER_MAX_RANGE)
 
 // Task parameters
@@ -46,16 +47,17 @@
 #define UI_TASK_PERIOD       10        // 5ms period (200Hz) for responsive UI - INCREASED FREQUENCY
 #define STATE_TASK_PERIOD    100        // 100ms period
 #define REWARD_DURATION_MS   500       // 500ms to signal the syringe pump via TTL
-#define TRIAL_TIMEOUT_MS 3500  // 3.5 seconds
+#define TRIAL_TIMEOUT_MS     3500  // 3.5 seconds
+#define ENCODER_DIR          -1 // invert the direction of the encoder values for push/pull
 
 
-// Define LEDC parameters, used here for audio generation via PWMs
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_HIGH_SPEED_MODE
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT    // 13-bit duty resolution
-#define LEDC_MAX_DUTY           ((1 << LEDC_DUTY_RES) - 1)  // For 13-bit, max duty is 8191
-#define TONE_GPIO               48                   // PWM output on GPIO 48
+// // Define LEDC parameters, used here for audio generation via PWMs
+// #define LEDC_TIMER              LEDC_TIMER_0
+// #define LEDC_MODE               LEDC_HIGH_SPEED_MODE
+// #define LEDC_CHANNEL            LEDC_CHANNEL_0
+// #define LEDC_DUTY_RES           LEDC_TIMER_13_BIT    // 13-bit duty resolution
+// #define LEDC_MAX_DUTY           ((1 << LEDC_DUTY_RES) - 1)  // For 13-bit, max duty is 8191
+// #define TONE_GPIO               48                   // PWM output on GPIO 48
 
 
 // Global variables
@@ -369,8 +371,8 @@ static void animation_callback(void *var, int32_t value) {
 void start_animation_to_position(int32_t position) {
     // Convert encoder position to screen coordinate
     int32_t screen_center = SCREEN_WIDTH / 2;
-    int32_t screen_value = screen_center + ((position * (SCREEN_WIDTH / 2 - INDICATOR_SIZE)) / ENCODER_MAX_RANGE);
-    
+    int32_t screen_value = screen_center + (ENCODER_DIR * ((position * (SCREEN_WIDTH/2 - INDICATOR_SIZE)) / ENCODER_MAX_RANGE));
+
     // Clamp to screen bounds
     if (screen_value < INDICATOR_SIZE / 2) screen_value = INDICATOR_SIZE / 2;
     if (screen_value > SCREEN_WIDTH - INDICATOR_SIZE / 2) screen_value = SCREEN_WIDTH - INDICATOR_SIZE / 2;
@@ -569,8 +571,9 @@ static void create_lever_ui(lv_display_t *display) {
     // --- Trial counter label ---
     session.trial_counter_label = lv_label_create(scr);
     lv_obj_set_style_text_color(session.trial_counter_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(session.trial_counter_label, &lv_font_montserrat_12, 0); // Small font
     lv_label_set_text_fmt(session.trial_counter_label, "Trial: 0/%d", session.num_trials);
-    lv_obj_align(session.trial_counter_label, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_align(session.trial_counter_label, LV_ALIGN_TOP_RIGHT, -10, 10); // Top-right corner
 
     ESP_LOGI(TAG, "UI creation complete");
 }
@@ -596,9 +599,9 @@ void ui_update_task(void *pvParameters) {
 
             if (encoder_value != last_encoder_value) {
                 int32_t screen_center = SCREEN_WIDTH / 2;
-                int32_t screen_val    = screen_center
-                                      + ((encoder_value * (SCREEN_WIDTH/2 - INDICATOR_SIZE))
-                                         / ENCODER_MAX_RANGE);
+                int32_t screen_val = screen_center
+                            + (ENCODER_DIR * ((encoder_value * (SCREEN_WIDTH/2 - INDICATOR_SIZE))
+                            / ENCODER_MAX_RANGE));
 
                 screen_val = LV_CLAMP(screen_val, INDICATOR_SIZE/2, SCREEN_WIDTH - INDICATOR_SIZE/2);
 
