@@ -33,7 +33,7 @@
 #define SCREEN_WIDTH         1024     // Screen width (pixels)
 #define SCREEN_HEIGHT        600      // Screen height (pixels)
 #define INDICATOR_SIZE       30       // Size of the indicator circle (pixels)
-#define CONDITION_SIZE       60       // Size of condition circles (pixels) - INCREASED SIZE
+#define CONDITION_SIZE       80       // Size of condition circles (pixels) - INCREASED SIZE
 #define INDICATOR_START_X    (SCREEN_WIDTH / 2)  // Center X position
 #define INDICATOR_Y_POS      (SCREEN_HEIGHT / 2) // Vertical center position
 
@@ -42,7 +42,7 @@
 #define CONDITION_SCREEN_OFFSET ((CONDITION_OFFSET * (SCREEN_WIDTH / 2 - INDICATOR_SIZE)) / ENCODER_MAX_RANGE)
 
 // Task parameters
-#define STACK_SIZE           4096
+#define STACK_SIZE          4096
 #define ENCODER_TASK_PERIOD  5        // 5ms period (200Hz) - INCREASED FREQUENCY
 #define UI_TASK_PERIOD       10        // 5ms period (200Hz) for responsive UI - INCREASED FREQUENCY
 #define STATE_TASK_PERIOD    100        // 100ms period
@@ -118,14 +118,14 @@ bool animation_active = false;
 int32_t animation_target = 0;
 
 typedef enum {
-    REWARD_FIXED_LEFT,
-    REWARD_FIXED_RIGHT,
+    REWARD_FIXED_PUSH,
+    REWARD_FIXED_PULL,
     REWARD_RANDOM
 } reward_mode_t;
 
 typedef struct {
     bool           reward_color_is_green; // true=green reward, false=purple
-    reward_mode_t  reward_mode;           // fixed left/right or random
+    reward_mode_t  reward_mode;           // fixed push/pull or random
     int32_t        reward_x_pos;          // computed X for reward circle
     int32_t        nonreward_x_pos;       // opposite side
 } RewardConfig;
@@ -134,9 +134,9 @@ typedef struct {
 // Initialize with default values. For example, if fixed and reward is on the left:
 RewardConfig reward_config = {
     .reward_color_is_green = true,          // Green is the reward color
-    .reward_mode = REWARD_FIXED_LEFT,       // Default to fixed left
-    .reward_x_pos = INDICATOR_START_X - CONDITION_SCREEN_OFFSET,  // Reward circle on left
-    .nonreward_x_pos = INDICATOR_START_X + CONDITION_SCREEN_OFFSET  // Nonreward on right
+    .reward_mode = REWARD_FIXED_PUSH,       // Default to fixed left
+    .reward_x_pos = INDICATOR_START_X - CONDITION_SCREEN_OFFSET,  // Reward circle on top(push)
+    .nonreward_x_pos = INDICATOR_START_X + CONDITION_SCREEN_OFFSET  // Nonreward on bottom
 };
 
 typedef struct {
@@ -268,16 +268,16 @@ static void wait_for_config(void) {
     }
     else if (mode == 'F') {
         if (side == 'L') {
-            session.reward_config.reward_mode = REWARD_FIXED_LEFT;
+            session.reward_config.reward_mode = REWARD_FIXED_PUSH;
             session.reward_config.reward_x_pos     = INDICATOR_START_X - CONDITION_SCREEN_OFFSET;
             session.reward_config.nonreward_x_pos  = INDICATOR_START_X + CONDITION_SCREEN_OFFSET;
-            printf("Reward mode: FIXED LEFT\n");
+            printf("Reward mode: FIXED PUSH\n");
         }
         else if (side == 'R') {
-            session.reward_config.reward_mode = REWARD_FIXED_RIGHT;
+            session.reward_config.reward_mode = REWARD_FIXED_PULL;
             session.reward_config.reward_x_pos     = INDICATOR_START_X + CONDITION_SCREEN_OFFSET;
             session.reward_config.nonreward_x_pos  = INDICATOR_START_X - CONDITION_SCREEN_OFFSET;
-            printf("Reward mode: FIXED RIGHT\n");
+            printf("Reward mode: FIXED PULL\n");
         }
         else {
             // Invalid side value
@@ -295,8 +295,8 @@ static void wait_for_config(void) {
         session.num_trials,
         session.reward_config.reward_color_is_green ? "Green" : "Purple",
         (session.reward_config.reward_mode == REWARD_RANDOM) ? "Random" :
-        (session.reward_config.reward_mode == REWARD_FIXED_LEFT) ? "Fixed Left" :
-        (session.reward_config.reward_mode == REWARD_FIXED_RIGHT) ? "Fixed Right" : "Unknown");
+        (session.reward_config.reward_mode == REWARD_FIXED_PUSH) ? "Fixed Push" :
+        (session.reward_config.reward_mode == REWARD_FIXED_PULL) ? "Fixed Pull" : "Unknown");
 
     update_circle_styles();
     printf("ACK\n");
@@ -630,8 +630,8 @@ void ui_update_task(void *pvParameters) {
 
 // Now only randomize our single reward_circle, not two separate circles:
 void randomize_condition_circle_positions(void) {
-    bool on_right = (esp_random() & 0x01);
-    int32_t pos_x = on_right
+    bool on_bottom = (esp_random() & 0x01);
+    int32_t pos_x = on_bottom
                   ? (INDICATOR_START_X + CONDITION_SCREEN_OFFSET)
                   : (INDICATOR_START_X - CONDITION_SCREEN_OFFSET);
 
@@ -647,7 +647,7 @@ void randomize_condition_circle_positions(void) {
     // recolor/highlight to match reward_config
     update_reward_styles();
 
-    ESP_LOGI(TAG, "Randomized reward circle to %s side", on_right ? "right" : "left");
+    ESP_LOGI(TAG, "Randomized reward circle to %s side", on_bottom ? "pull" : "push");
 }
 
 // Function to update the trial counter display
@@ -713,16 +713,16 @@ void trial_state_task(void *pvParameters) {
         case TRIAL_CUE: {
             // position reward_circle alone
             int32_t rx, nrx;
-            if (session.reward_config.reward_mode == REWARD_FIXED_LEFT) {
+            if (session.reward_config.reward_mode == REWARD_FIXED_PUSH) {
                 rx  = INDICATOR_START_X - CONDITION_SCREEN_OFFSET;
                 nrx = INDICATOR_START_X + CONDITION_SCREEN_OFFSET;
-            } else if (session.reward_config.reward_mode == REWARD_FIXED_RIGHT) {
+            } else if (session.reward_config.reward_mode == REWARD_FIXED_PULL) {
                 rx  = INDICATOR_START_X + CONDITION_SCREEN_OFFSET;
                 nrx = INDICATOR_START_X - CONDITION_SCREEN_OFFSET;
             } else { // random
-                bool right = (esp_random() & 1);
-                rx  = INDICATOR_START_X + ( right ? CONDITION_SCREEN_OFFSET : -CONDITION_SCREEN_OFFSET);
-                nrx = INDICATOR_START_X + (!right? CONDITION_SCREEN_OFFSET : -CONDITION_SCREEN_OFFSET);
+                bool pull = (esp_random() & 1);
+                rx  = INDICATOR_START_X + ( pull ? CONDITION_SCREEN_OFFSET : -CONDITION_SCREEN_OFFSET);
+                nrx = INDICATOR_START_X + (!pull? CONDITION_SCREEN_OFFSET : -CONDITION_SCREEN_OFFSET);
             }
             // store for later
             session.reward_config.reward_x_pos = rx;
@@ -968,11 +968,11 @@ void app_main(void) {
     
     // Create encoder reading task (highest priority)
     xTaskCreate(encoder_read_task, "encoder_task", STACK_SIZE, NULL, 
-                configMAX_PRIORITIES - 4, NULL);
+                configMAX_PRIORITIES - 5, NULL);
     
     // Create UI update task
     xTaskCreate(ui_update_task, "ui_task", STACK_SIZE, NULL, 
-                configMAX_PRIORITIES - 5, NULL);
+                configMAX_PRIORITIES - 4, NULL);
     
     // Create trial state machine task (lower priority)
     xTaskCreate(trial_state_task, "trial_state_task", STACK_SIZE, NULL, 
