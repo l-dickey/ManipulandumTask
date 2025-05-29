@@ -10,16 +10,17 @@ import serial
 import serial.tools.list_ports
 
 # === Serial Setup ===
-def find_serial_port():
-    ports = serial.tools.list_ports.comports()
-    for p in ports:
-        if 'USB' in p.description or 'Serial' in p.description:
-            return p.device
-    return None
+# def find_serial_port():
+#     ports = serial.tools.list_ports.comports()
+#     for p in ports:
+#         if 'USB' in p.description or 'Serial' in p.description:
+#             return p.device
+#     return None
 
-serial_port = find_serial_port()
-if serial_port is None:
-    raise RuntimeError("No serial port found")
+# serial_port = find_serial_port()
+# if serial_port is None:
+#     raise RuntimeError("No serial port found")
+serial_port = 'COM7'
 
 ser = serial.Serial(serial_port, 115200, timeout=1)
 print(f"Connected to {serial_port}")
@@ -208,8 +209,8 @@ mode_box = ttk.Combobox(right_column, textvariable=mode_var, values=["Fixed", "R
 mode_box.grid(row=0, column=1, padx=10, pady=12, sticky="w")
 
 tk.Label(right_column, text="Fixed Side:", font=label_font, bg=CARD_BG).grid(row=1, column=0, sticky="e", padx=10, pady=12)
-side_var = tk.StringVar(value="Left")
-side_box = ttk.Combobox(right_column, textvariable=side_var, values=["Left", "Right"], state="readonly", width=15)
+side_var = tk.StringVar(value="Push")
+side_box = ttk.Combobox(right_column, textvariable=side_var, values=["Push", "Pull"], state="readonly", width=15)
 side_box.grid(row=1, column=1, padx=10, pady=12, sticky="w")
 
 def update_side_state(*args):
