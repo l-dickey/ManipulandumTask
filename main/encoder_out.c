@@ -1,6 +1,7 @@
 #include "encoder_out.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include <math.h>
 
 #define I2C_MASTER_NUM              I2C_NUM_0
 #define I2C_MASTER_SDA_IO           21
@@ -16,7 +17,7 @@
 
 static const char *TAG = "ENCODER_OUT";
 
-esp_err_t encoder_out_init(void) {
+esp_err_t encoder_out_init(void) { // set up the i2c stuff
     i2c_config_t conf = {
         .mode             = I2C_MODE_MASTER,
         .sda_io_num       = I2C_MASTER_SDA_IO,
@@ -33,25 +34,27 @@ esp_err_t encoder_out_init(void) {
     return ESP_OK;
 }
 
-static uint16_t scale_encoder_to_dac(int32_t encoder_val) {
-    if (encoder_val > ENCODER_MAX_RANGE) encoder_val = ENCODER_MAX_RANGE;
-    if (encoder_val < -ENCODER_MAX_RANGE) encoder_val = -ENCODER_MAX_RANGE;
-    uint32_t shifted = encoder_val + ENCODER_MAX_RANGE;  
-    return (shifted * 4095) / (2 * ENCODER_MAX_RANGE);
+static uint16_t scale_encoder_to_dac(int32_t encoder_val) { //  scale the voltage so we can read it on an analog in port on intan
+    encoder_val = fminf(fmaxf(encoder_val, -ENCODER_MAX_RANGE),
+                       +ENCODER_MAX_RANGE);
+    uint32_t shifted = (uint32_t)(encoder_val + ENCODER_MAX_RANGE);
+    return (uint16_t)((shifted * 4095) / (2 * ENCODER_MAX_RANGE));
 }
 
-esp_err_t encoder_out_update(int32_t encoder_val) {
-    uint16_t dac_value = scale_encoder_to_dac(encoder_val);
+// rename to take *no* argument, and read from the encoder module directly
+esp_err_t encoder_out_update(void) {
+    int32_t enc = read_encoder();                // ← grab the count
+    uint16_t dac = scale_encoder_to_dac(enc);
 
-    uint8_t packet[3];
-    packet[0] = MCP4725_CMD_WRITEDAC;
-    packet[1] = dac_value >> 4;            // Upper 8 bits (D11-D4)
-    packet[2] = (dac_value & 0x0F) << 4;   // Lower 4 bits shifted left
-
+    uint8_t packet[3] = {
+        MCP4725_CMD_WRITEDAC,
+        (uint8_t)(dac >> 4),                     // D11–D4
+        (uint8_t)((dac & 0x0F) << 4)             // D3–D0
+    };
     return i2c_master_write_to_device(
         I2C_MASTER_NUM,
         MCP4725_ADDR,
         packet, sizeof(packet),
-        pdMS_TO_TICKS(100)
+        pdMS_TO_TICKS(10) // time out after 10ms
     );
 }
