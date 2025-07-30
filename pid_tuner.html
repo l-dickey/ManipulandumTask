@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Motor PID Tuner</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 30px;
+            padding: 30px;
+            height: calc(100vh - 200px);
+        }
+        
+        .control-panel {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
+            overflow-y: auto;
+        }
+        
+        .chart-panel {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+        }
+        
+        .section h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 8px;
+        }
+        
+        .param-group {
+            display: grid;
+            grid-template-columns: 1fr 80px;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        
+        .param-group label {
+            font-weight: 600;
+            color: #34495e;
+            font-size: 0.9em;
+        }
+        
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .param-group input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #ddd;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .param-group input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #3498db;
+            cursor: pointer;
+        }
+        
+        .param-group input[type="number"] {
+            padding: 6px 8px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.85em;
+            text-align: center;
+            width: 100%;
+        }
+        
+        .serial-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        select, button {
+            padding: 10px 16px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        button {
+            border: none;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white;
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, #27ae60, #229954);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+            color: white;
+        }
+        
+        .btn-primary:hover, .btn-success:hover, .btn-danger:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-disconnected { background: #e74c3c; }
+        .status-connected { background: #27ae60; }
+        
+        .data-display {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .data-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        
+        .data-card h4 {
+            color: #7f8c8d;
+            font-size: 0.8em;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+        
+        .data-card .value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .chart-container {
+            flex: 1;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            position: relative;
+        }
+        
+        .quick-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        
+        .quick-actions button {
+            padding: 8px 12px;
+            font-size: 0.8em;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                height: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎛️ ESP32 Motor PID Tuner</h1>
+            <p>Real-time parameter tuning with live plotting</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="control-panel">
+                <div class="section">
+                    <h3>🔌 Connection</h3>
+                    <div class="serial-controls">
+                        <button id="connectBtn" class="btn-primary">Connect</button>
+                        <div style="display: flex; align-items: center;">
+                            <span class="status-indicator status-disconnected" id="statusIndicator"></span>
+                            <span id="connectionStatus" style="font-size: 0.8em;">Disconnected</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>🎯 PID Gains</h3>
+                    <div class="param-group">
+                        <label>Kp:</label>
+                        <div class="slider-container">
+                            <input type="range" id="kpSlider" min="0" max="2" step="0.01" value="0.1">
+                            <input type="number" id="kpValue" min="0" max="2" step="0.01" value="0.1">
+                        </div>
+                    </div>
+                    <div class="param-group">
+                        <label>Ki:</label>
+                        <div class="slider-container">
+                            <input type="range" id="kiSlider" min="0" max="1" step="0.001" value="0.000">
+                            <input type="number" id="kiValue" min="0" max="1" step="0.001" value="0.000">
+                        </div>
+                    </div>
+                    <div class="param-group">
+                        <label>Kd:</label>
+                        <div class="slider-container">
+                            <input type="range" id="kdSlider" min="0" max="1" step="0.001" value="0.000">
+                            <input type="number" id="kdValue" min="0" max="1" step="0.001" value="0.000">
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>⚙️ Parameters</h3>
+                    <div class="param-group">
+                        <label>Target:</label>
+                        <div class="slider-container">
+                            <input type="range" id="targetSlider" min="-1000" max="1000" step="10" value="0">
+                            <input type="number" id="targetValue" min="-1000" max="1000" step="10" value="0">
+                        </div>
+                    </div>
+                    <div class="param-group">
+                        <label>Deadzone:</label>
+                        <div class="slider-container">
+                            <input type="range" id="deadzoneSlider" min="0" max="50" step="1" value="10">
+                            <input type="number" id="deadzoneValue" min="0" max="50" step="1" value="10">
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>🎮 Control</h3>
+                    <div class="quick-actions">
+                        <button class="btn-success" onclick="sendPreset('conservative')">Conservative</button>
+                        <button class="btn-success" onclick="sendPreset('aggressive')">Aggressive</button>
+                        <button class="btn-danger" onclick="sendCommand('STOP')">Stop</button>
+                        <button class="btn-danger" onclick="sendCommand('RESET')">Reset</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chart-panel">
+                <div class="data-display">
+                    <div class="data-card">
+                        <h4>Position</h4>
+                        <div class="value" id="currentPos">0</div>
+                    </div>
+                    <div class="data-card">
+                        <h4>Error</h4>
+                        <div class="value" id="currentError">0</div>
+                    </div>
+                </div>
+                
+                <div class="chart-container">
+                    <canvas id="pidChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Chart.js setup
+        const ctx = document.getElementById('pidChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Position',
+                    data: [],
+                    borderColor: '#3498db',
+                    backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                    tension: 0.1,
+                    pointRadius: 0
+                }, {
+                    label: 'Target',
+                    data: [],
+                    borderColor: '#e74c3c',
+                    backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                    tension: 0.1,
+                    pointRadius: 0
+                }, {
+                    label: 'Error',
+                    data: [],
+                    borderColor: '#f39c12',
+                    backgroundColor: 'rgba(243, 156, 18, 0.1)',
+                    tension: 0.1,
+                    pointRadius: 0,
+                    yAxisID: 'y1'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    x: {
+                        type: 'linear',
+                        position: 'bottom',
+                        title: {
+                            display: true,
+                            text: 'Time (s)'
+                        }
+                    },
+                    y: {
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
+                        title: {
+                            display: true,
+                            text: 'Position'
+                        }
+                    },
+                    y1: {
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        title: {
+                            display: true,
+                            text: 'Error'
+                        },
+                        grid: {
+                            drawOnChartArea: false,
+                        },
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true
+                    }
+                }
+            }
+        });
+
+        // Data management
+        let dataPoints = [];
+        let startTime = Date.now();
+        const MAX_POINTS = 200; // Keep last 200 points for smooth performance
+
+        // Serial port management
+        let port = null;
+        let reader = null;
+        let isConnected = false;
+
+        // Parameter synchronization
+        function syncSliderAndInput(sliderId, inputId) {
+            const slider = document.getElementById(sliderId);
+            const input = document.getElementById(inputId);
+            
+            slider.addEventListener('input', () => {
+                input.value = slider.value;
+                sendParameter(sliderId.replace('Slider', ''), slider.value);
+            });
+            
+            input.addEventListener('input', () => {
+                slider.value = input.value;
+                sendParameter(sliderId.replace('Slider', ''), input.value);
+            });
+        }
+
+        // Initialize parameter sync
+        syncSliderAndInput('kpSlider', 'kpValue');
+        syncSliderAndInput('kiSlider', 'kiValue');
+        syncSliderAndInput('kdSlider', 'kdValue');
+        syncSliderAndInput('targetSlider', 'targetValue');
+        syncSliderAndInput('deadzoneSlider', 'deadzoneValue');
+
+        // Serial connection functions
+        async function connectSerial() {
+            try {
+                if ('serial' in navigator) {
+                    port = await navigator.serial.requestPort();
+                    await port.open({ baudRate: 115200 });
+                    
+                    reader = port.readable.getReader();
+                    isConnected = true;
+                    updateConnectionStatus(true);
+                    readSerialData();
+                    
+                    // Reset chart data
+                    chart.data.labels = [];
+                    chart.data.datasets.forEach(dataset => dataset.data = []);
+                    chart.update();
+                    startTime = Date.now();
+                } else {
+                    alert('Web Serial API not supported. Please use Chrome/Edge browser.');
+                }
+            } catch (error) {
+                console.error('Serial connection error:', error);
+                alert('Connection failed: ' + error.message);
+            }
+        }
+
+        async function disconnectSerial() {
+            if (reader) {
+                await reader.cancel();
+                reader.releaseLock();
+            }
+            if (port) {
+                await port.close();
+            }
+            port = null;
+            reader = null;
+            isConnected = false;
+            updateConnectionStatus(false);
+        }
+
+        async function readSerialData() {
+            let buffer = '';
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    const text = new TextDecoder().decode(value);
+                    buffer += text;
+                    
+                    // Process complete lines
+                    let lines = buffer.split('\n');
+                    buffer = lines.pop(); // Keep incomplete line
+                    
+                    lines.forEach(line => {
+                        if (line.trim()) {
+                            parseSerialData(line.trim());
+                        }
+                    });
+                }
+            } catch (error) {
+                console.error('Read error:', error);
+            }
+        }
+
+        async function sendCommand(command) {
+            if (!port || !isConnected) {
+                alert('Please connect to serial port first');
+                return;
+            }
+            
+            const writer = port.writable.getWriter();
+            const data = new TextEncoder().encode(command + '\n');
+            await writer.write(data);
+            writer.releaseLock();
+        }
+
+        function sendParameter(param, value) {
+            if (!isConnected) return;
+            const command = `SET_${param.toUpperCase()}_${value}`;
+            sendCommand(command);
+        }
+
+        function sendPreset(type) {
+            if (type === 'conservative') {
+                updateSlider('kp', 0.05);
+                updateSlider('ki', 0.001);
+                updateSlider('kd', 0.001);
+            } else if (type === 'aggressive') {
+                updateSlider('kp', 0.2);
+                updateSlider('ki', 0.01);
+                updateSlider('kd', 0.005);
+            }
+        }
+
+        function updateSlider(param, value) {
+            document.getElementById(param + 'Slider').value = value;
+            document.getElementById(param + 'Value').value = value;
+            sendParameter(param, value);
+        }
+
+        function parseSerialData(data) {
+            // Parse simple format: "POS:123,ERR:45"
+            const posMatch = data.match(/POS:(-?\d+)/);
+            const errMatch = data.match(/ERR:(-?\d+)/);
+            
+            if (posMatch && errMatch) {
+                const position = parseInt(posMatch[1]);
+                const error = parseInt(errMatch[1]);
+                const target = position + error; // target = pos + error
+                
+                // Update display
+                document.getElementById('currentPos').textContent = position;
+                document.getElementById('currentError').textContent = error;
+                
+                // Add to chart
+                const currentTime = (Date.now() - startTime) / 1000; // seconds
+                
+                chart.data.labels.push(currentTime);
+                chart.data.datasets[0].data.push({x: currentTime, y: position});
+                chart.data.datasets[1].data.push({x: currentTime, y: target});
+                chart.data.datasets[2].data.push({x: currentTime, y: error});
+                
+                // Keep only last MAX_POINTS
+                if (chart.data.labels.length > MAX_POINTS) {
+                    chart.data.labels.shift();
+                    chart.data.datasets.forEach(dataset => dataset.data.shift());
+                }
+                
+                chart.update('none'); // No animation for smooth performance
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('connectionStatus');
+            const connectBtn = document.getElementById('connectBtn');
+            
+            if (connected) {
+                statusIndicator.className = 'status-indicator status-connected';
+                statusText.textContent = 'Connected';
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.className = 'btn-danger';
+                connectBtn.onclick = disconnectSerial;
+            } else {
+                statusIndicator.className = 'status-indicator status-disconnected';
+                statusText.textContent = 'Disconnected';
+                connectBtn.textContent = 'Connect';
+                connectBtn.className = 'btn-primary';
+                connectBtn.onclick = connectSerial;
+            }
+        }
+
+        // Initialize
+        updateConnectionStatus(false);
+    </script>
+</body>
+</html>
