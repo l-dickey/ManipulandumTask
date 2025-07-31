@@ -13,6 +13,7 @@
 #include "esp_rom_sys.h"
 #include "driver/pcnt.h"
 
+#include "hal/gpio_types.h"
 #include "lvgl.h"
 #include "lv_conf.h"
 #include "graphics.h"
@@ -32,7 +33,7 @@
 #define TAG                 "PHASE1_TASK"
 #define GPIO_REWARD_SIGNAL  3
 #define GPIO_EVENT_PIN      4
-#define ENCODER_THRESHOLD   -35
+#define ENCODER_THRESHOLD   -25
 #define CUE_DURATION_MS     500
 #define TRIAL_TIMEOUT_MS    3000
 #define RESET_DELAY_MS      1000
@@ -44,11 +45,13 @@
 #define RESET_THRESHOLD    5    // only consider “home” if within ±5 counts of zero
 #define RESET_HOLD_MS     50    // must hold for 20 ms before we call it done
 
-
-static const float B_level[4] = {0.03f, 0.03f, 0.03f, 0.03f}; // set the levels of B coeff for vsicous force fields
+static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f}; // set the levels of B coeff for vsicous force fields
 // -----------------------------------------------------------------------------
 // global flag for PID‐homing
 static volatile bool homing_active = false;
+static float kp = 0.21;
+static float ki = 0.001;
+static float kd = 0.003;
 // -----------------------------------------------------------------------------
 
 
@@ -75,7 +78,9 @@ static uint32_t session_total;
 bool motor_locked = false;
 
 // cue frequencies for rewardType = 0..3
-static const uint32_t cue_freqs[4] = { 1000, 2000, 3000, 4000 };
+static const uint32_t cue_freqs[4] = { 500, 1000, 2000, 3000 };
+
+static const uint32_t reward_freq = 5000;
 
 // send CSV over UART / printf
 static void send_trial_data(trial_outcome_t outcome,
@@ -274,177 +279,198 @@ static void pid_task(void *pv)
     }
 }
 
-void simplified_trial_task(void *pv)
+static void pulse_reward_ttl() {
+    gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    gpio_set_level(GPIO_REWARD_SIGNAL, 0);
+}
+
+    void simplified_trial_task(void *pv)
 {
-    const TickType_t loop_period = pdMS_TO_TICKS(2);  // 500 Hz
+    const TickType_t loop_period = pdMS_TO_TICKS(2);  // 500 Hz
     TickType_t next = xTaskGetTickCount();
 
     sm_state_t   state        = S_INIT;
     TickType_t   state_ts     = next;
-    TickType_t   hold_ts      = 0;   // for REWARD_HOLD_MS
-    TickType_t   reset_hold_ts= 0;   // for RESET_HOLD_MS
-    bool         reset_ready  = false;
+    TickType_t   hold_ts      = 0;
     int          rewardType   = 0;
     const int32_t targetPos   = 0;
+    bool         first_entry  = true;
 
-    while (1) {
+    while(1) {
         TickType_t now = xTaskGetTickCount();
 
-        // 1) sample encoder
+        // Always update the reward‐TTL engine first
+        reward_update(now);
+
+        // Sample encoder once per loop
         int32_t pos;
         xSemaphoreTake(encoder_mutex, portMAX_DELAY);
           pos = current_encoder_value;
         xSemaphoreGive(encoder_mutex);
 
-        // 2) update any running reward logic
-        reward_update(now);
-
-        switch (state) {
-            // ───────────────── INIT ───────────────────
-            case S_INIT:
-                homing_active = false;
-                reset_ready   = false;
-                trial_number++;
-                session_total++;
+        switch(state) {
+        // ───────────── INIT ─────────────
+        case S_INIT:
+            if (first_entry) {
+                trial_number++;  session_total++;
                 hide_all_gratings();
-
-                rewardType  = rand() % 4;
+                rewardType   = rand() % 4;
                 motor_locked = true;
-
-                // re‐init viscous model for next MOVING
                 motorctrl_init_viscous(0.002f, 0.02f, B_level[rewardType]);
+                first_entry  = false;
+            }
+            // immediately cue
+            sm_enter(S_CUE, CUE_EVENT[rewardType]);
+            state     = S_CUE;
+            state_ts  = now;
+            first_entry = true;
+            break;
 
-                sm_enter(S_CUE, CUE_EVENT[rewardType]);
-                state    = S_CUE;
-                state_ts = now;
-                break;
-
-            // ───────────────── CUE ────────────────────
-            case S_CUE:
+        // ───────────── CUE ──────────────
+        case S_CUE:
+            if (first_entry) {
                 if (rewardType > 0) show_grating_for(rewardType);
                 init_ledc(cue_freqs[rewardType]);
-                vTaskDelay(pdMS_TO_TICKS(CUE_DURATION_MS));
+                first_entry = false;
+            }
+            if (now - state_ts >= pdMS_TO_TICKS(CUE_DURATION_MS)) {
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
                 hide_all_gratings();
-
-                motor_locked  = false;
-                homing_active = false;
+                motor_locked = false;
                 sm_enter(S_MOVING, MOVING);
-                state    = S_MOVING;
-                state_ts = now;
-                hold_ts  = 0;
-                break;
+                state     = S_MOVING;
+                state_ts  = now;
+                first_entry = true;
+            }
+            break;
 
-            // ───────────────── MOVING ─────────────────
-            case S_MOVING: {
+        // ───────────── MOVING ────────────
+        case S_MOVING:
+            {
                 float u = motor_locked ? 0.0f : motorctrl_viscous(pos);
                 apply_control_mcpwm(u);
-
-                if (pos < ENCODER_THRESHOLD) {
-                    if (hold_ts == 0) {
-                        hold_ts = now;
-                    } else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
-                        reward_start(rewardType);
-                        session_correct += (rewardType>0);
-
-                        motor_locked = true;
-                        homing_active = false;
-                        sm_enter(S_REWARD, REW_EVENT[rewardType]);
-                        state    = S_REWARD;
-                        state_ts = now;
-                    }
-                } else {
-                    hold_ts = 0;
-                }
-
-                // timeout?
-                if (now - state_ts > pdMS_TO_TICKS(TRIAL_TIMEOUT_MS)) {
-                    motor_locked = true;
-                    homing_active = false;
-                    sm_enter(S_TIMEOUT, TIMEOUT);
-                    state    = S_TIMEOUT;
-                    state_ts = now;
-                }
-                break;
+                
             }
-
-            // ───────────────── REWARD ────────────────
-            case S_REWARD:
-                if (!reward_active()) {
-                    sm_enter(S_RESET, RESET);
-                    state    = S_RESET;
-                    state_ts = now;
-                    reset_hold_ts = 0;
-                    reset_ready   = false;
-
-                    // arm PID‐homing
-                    pid_init(0.21f, 0.01f, 0.001f, 0, 0, 0.002f, 5);
-                    homing_active = true;
-                    printf(">> RESET: homing started\n");
+            // threshold‐crossing?
+            if (pos < ENCODER_THRESHOLD) {
+                if (hold_ts == 0) hold_ts = now;
+                else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+                    sm_enter(S_REWARD, REW_EVENT[rewardType]);
+                    state     = S_REWARD;
+                    state_ts  = now;
+                    first_entry = true;
                 }
-                break;
+            } else {
+                hold_ts = 0;
+            }
+            // timeout‐fallback?
+            if (now - state_ts > pdMS_TO_TICKS(TRIAL_TIMEOUT_MS)) {
+                sm_enter(S_TIMEOUT, TIMEOUT);
+                state     = S_TIMEOUT;
+                state_ts  = now;
+                first_entry = true;
+            }
+            break;
 
-            // ───────────────── TIMEOUT ───────────────
-            case S_TIMEOUT:
-                if (now - state_ts > pdMS_TO_TICKS(500)) {
-                    sm_enter(S_RESET, RESET);
-                    state    = S_RESET;
-                    state_ts = now;
-                    reset_hold_ts = 0;
-                    reset_ready   = false;
+        // ───────────── REWARD ────────────
+        case S_REWARD: {
+            // these statics persist across calls in S_REWARD
+            static bool        first_entry = true;
+            static int         pulses_done;
+            static bool        pin_state;
+            static TickType_t  last_toggle;
 
-                    // arm PID‐homing
-                    pid_init(0.21f, 0.01f, 0.001f, 0, 0, 0.002f, 5);
-                    homing_active = true;
-                    printf(">> RESET (timeout): homing started\n");
+            if (first_entry) {
+                // 1) start tone
+                init_ledc(reward_freq);
+                // 2) arm our “blink” on the reward pin
+                gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+                pulses_done  = 0;
+                pin_state    = true;       // we’re currently HIGH
+                last_toggle  = now;
+                first_entry  = false;
+            } else {
+                TickType_t dt = now - last_toggle;
+                if (pin_state && dt >= pdMS_TO_TICKS(501)) {
+                    // end of a 500 ms HIGH → go LOW for 500 ms
+                    gpio_set_level(GPIO_REWARD_SIGNAL, 0);
+                    pin_state   = false;
+                    last_toggle = now;
                 }
-                break;
-
-            // ───────────────── RESET ─────────────────
-            case S_RESET:
-                // just monitor position — PID is running in pid_task()
-                if (fabsf((float)pos - (float)targetPos) <= RESET_THRESHOLD) {
-                    if (!reset_ready) {
-                        reset_ready = true;
-                        reset_hold_ts = now;
-                        printf("RESET: within ±%d, starting hold\n", RESET_THRESHOLD);
+                else if (!pin_state && dt >= pdMS_TO_TICKS(500)) {
+                    // finished one full on/off cycle?
+                    pulses_done++;
+                    if (pulses_done < rewardType) {
+                        // start next HIGH phase
+                        gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+                        pin_state   = true;
+                        last_toggle = now;
+                    } else {
+                        // we’ve done all pulses → clean up and advance
+                        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+                        gpio_set_level(GPIO_REWARD_SIGNAL, 0);
+                        first_entry = true;
+                        sm_enter(S_RESET, RESET);
+                        state     = S_RESET;
+                        state_ts  = now;
                     }
-                    else if (now - reset_hold_ts >= pdMS_TO_TICKS(RESET_HOLD_MS)) {
-                        // done homing
-                        homing_active = false;
-                        apply_control_mcpwm(0);
-                        printf("RESET: homing complete at pos=%ld\n", (long)pos);
-
-                        send_trial_data(
-                          (rewardType>0) ? TRIAL_CORRECT : TRIAL_TIMEOUT,
-                          pdTICKS_TO_MS(now - state_ts),
-                          pos
-                        );
-                        update_trial_display();
-
-                        // wait RESET_DELAY_MS then re‐INIT
-                        if (now - state_ts > pdMS_TO_TICKS(RESET_DELAY_MS)) {
-                            sm_enter(S_INIT, INIT);
-                            state    = S_INIT;
-                            state_ts = now;
-                        }
-                    }
-                } else {
-                    // left the tolerance zone
-                    if (reset_ready) {
-                        printf("RESET: left tolerance, restarting hold\n");
-                    }
-                    reset_ready = false;
-                    reset_hold_ts = 0;
                 }
-                break;
-        } // end switch
+            }
+            break;
+}
+
+
+        // ───────────── TIMEOUT ───────────
+        case S_TIMEOUT:
+            if (first_entry) {
+                // you could flash a “timeout” tone or LED here
+                first_entry = false;
+            }
+            // after a short pause, go home
+            if (now - state_ts >= pdMS_TO_TICKS(500)) {
+                sm_enter(S_RESET, RESET);
+                state     = S_RESET;
+                state_ts  = now;
+                first_entry = true;
+            }
+            break;
+
+        // ───────────── RESET ─────────────
+        case S_RESET:
+            if (first_entry) {
+                // arm your PID toward zero once
+                pid_init(kp, ki, kd,0,0,0.002,5);
+                first_entry = false;
+                printf(">> RESET: homing started\n");
+            }
+            // run one PID step (in‐line or via pid_task)
+            pid_step(pos, targetPos);
+            // once “home,” stop and wrap up trial
+            if (abs(pos - targetPos) <= RESET_THRESHOLD) {
+                apply_control_mcpwm(0);
+                send_trial_data(
+                  (rewardType>0) ? TRIAL_CORRECT : TRIAL_TIMEOUT,
+                  pdTICKS_TO_MS(now - state_ts),
+                  pos
+                );
+                update_trial_display();
+                // after a little hold, back to INIT
+                if (now - state_ts >= pdMS_TO_TICKS(RESET_DELAY_MS)) {
+                    sm_enter(S_INIT, INIT);
+                    state     = S_INIT;
+                    state_ts  = now;
+                    first_entry = true;
+                }
+            }
+            break;
+        }
 
         vTaskDelayUntil(&next, loop_period);
     }
 }
-
 
 void app_main(void)
 {
@@ -452,9 +478,18 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting behavioral task…");
 
     // setup reward pin
-    reward_init(GPIO_REWARD_SIGNAL);
+    // reward_init(GPIO_REWARD_SIGNAL);
     ESP_ERROR_CHECK(event_init_rmt(GPIO_EVENT_PIN, 1000000));
 
+    gpio_config_t io_conf = {
+    .pin_bit_mask = 1ULL << GPIO_REWARD_SIGNAL ,
+    .mode         = GPIO_MODE_OUTPUT,
+    .pull_up_en   = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type    = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    gpio_set_level(GPIO_REWARD_SIGNAL,0);
     // encoder + DAC
     encoder_mutex = xSemaphoreCreateMutex();
     init_encoder();
@@ -463,7 +498,7 @@ void app_main(void)
     // motor
     init_mcpwm_highres();
     apply_control_mcpwm(0);
-    motorctrl_init_viscous(0.002f, 0.02f, 0.02f);
+    motorctrl_init_viscous(0.002f, 0.02f, 0.03f);
     pid_init(0.21, 0.01,0.001,0,0,0.002,5);
 
     // graphics
