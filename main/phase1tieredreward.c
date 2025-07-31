@@ -233,9 +233,9 @@ static void create_simple_ui(lv_display_t *display) {
 
     // 2) create three gratings for reward levels 1..3
     //    (stripe counts: 3, 7, and 13 are from your earlier design)
-    grating1 = create_grating_pattern(scr,  3);
+    grating1 = create_grating_pattern(scr,  13);
     grating2 = create_grating_pattern(scr,  7);
-    grating3 = create_grating_pattern(scr, 13);
+    grating3 = create_grating_pattern(scr, 3);
     hide_all_gratings();  // start hidden
 
     // 3) lever indicator in center
