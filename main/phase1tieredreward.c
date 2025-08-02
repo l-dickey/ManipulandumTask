@@ -375,75 +375,71 @@ static void pulse_reward_ttl() {
             break;
 
         // ───────────── REWARD ────────────
-       case S_REWARD: {
-            // persist across calls in S_REWARD
-            static bool        first_entry = true;
-            static int         pulses_done;
-            static bool        pin_state;
-            static TickType_t  last_toggle;
+      case S_REWARD: {
+        // persist across calls in S_REWARD
+        static bool        first_entry = true;
+        static int         pulses_done;
+        static bool        pin_state;
+        static TickType_t  last_toggle;
 
-            // Minimum “no-reward” duration (one 500 ms interval)
-            const TickType_t NO_REWARD_DUR = pdMS_TO_TICKS(500);
+        // how long each HIGH or LOW phase lasts
+        const TickType_t PHASE_MS = pdMS_TO_TICKS(500);
 
-            if (rewardType == 0) {
-                // --- no-reward “dummy” wait period  ---
-                if (first_entry) {
-                    first_entry = false;
-                    last_toggle = now;
-                }
-                else if (now - last_toggle >= NO_REWARD_DUR) {
-                    // done waiting → clean up and advance
-                    first_entry = true;
-                    sm_enter(S_RESET, RESET);
-                    state     = S_RESET;
-                    state_ts  = now;
-                }
-                break;
-            }
-
-            // --- otherwise rewardType > 0: full pulse + tone logic ---
+        // ----- special “zero reward” case: just wait one PHASE_MS then reset -----
+        if (rewardType == 0) {
             if (first_entry) {
-                // start the tone
-                init_ledc(reward_freq);
-                // drop pin high
-                gpio_set_level(GPIO_REWARD_SIGNAL, 1);
-
-                pulses_done  = 0;
-                pin_state    = true;       // currently HIGH
-                last_toggle  = now;
                 first_entry  = false;
+                last_toggle  = now;
             }
-            else {
-                TickType_t dt = now - last_toggle;
-                if (pin_state && dt >= pdMS_TO_TICKS(500 + 1)) {
-                    // end of a 500 ms HIGH → go LOW
-                    gpio_set_level(GPIO_REWARD_SIGNAL, 0);
-                    pin_state   = false;
-                    last_toggle = now;
-                }
-                else if (!pin_state && dt >= pdMS_TO_TICKS(500)) {
-                    // finished one full on/off cycle
-                    pulses_done++;
-                    if (pulses_done < rewardType) {
-                        // start next HIGH phase
-                        gpio_set_level(GPIO_REWARD_SIGNAL, 1);
-                        pin_state   = true;
-                        last_toggle = now;
-                    } else {
-                        // all pulses done → clean up
-                        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-                        gpio_set_level(GPIO_REWARD_SIGNAL, 0);
-
-                        first_entry = true;
-                        sm_enter(S_RESET, RESET);
-                        state     = S_RESET;
-                        state_ts  = now;
-                    }
-                }
+            else if (now - last_toggle >= PHASE_MS) {
+                first_entry = true;
+                sm_enter(S_RESET, RESET);
+                state      = S_RESET;
+                state_ts   = now;
             }
             break;
-}
+        }
+
+        // ----- rewardType > 0 case -----
+        if (first_entry) {
+            // start the first HIGH phase + tone
+            pulses_done     = 0;
+            pin_state       = true;                // we’re in HIGH
+            gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+            init_ledc(reward_freq);
+            last_toggle     = now;
+            first_entry     = false;
+            break;
+        }
+
+        TickType_t dt = now - last_toggle;
+        if (pin_state && dt >= PHASE_MS) {
+            // end of HIGH → go LOW, stop tone
+            gpio_set_level(GPIO_REWARD_SIGNAL, 0);
+            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+            pin_state   = false;
+            last_toggle = now;
+        }
+        else if (!pin_state && dt >= PHASE_MS) {
+            // end of LOW → either start next HIGH or finish
+            pulses_done++;
+            if (pulses_done < rewardType) {
+                // next HIGH + tone
+                gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+                init_ledc(reward_freq);
+                pin_state   = true;
+                last_toggle = now;
+            } else {
+                // all pulses done → cleanup & advance
+                first_entry = true;
+                sm_enter(S_RESET, RESET);
+                state     = S_RESET;
+                state_ts  = now;
+            }
+        }
+        break;
+    }
 
 
         // ───────────── TIMEOUT ───────────
