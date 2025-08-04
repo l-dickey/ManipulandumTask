@@ -33,7 +33,7 @@
 #define TAG                 "PHASE1_TASK"
 #define GPIO_REWARD_SIGNAL  3
 #define GPIO_EVENT_PIN      4
-#define ENCODER_THRESHOLD   -25
+#define ENCODER_THRESHOLD   -27
 #define CUE_DURATION_MS     500
 #define TRIAL_TIMEOUT_MS    3000
 #define RESET_DELAY_MS      1000
@@ -43,7 +43,7 @@
 #define SCREEN_HEIGHT       600
 #define REWARD_HOLD_MS 50 // how long to hold past encoder count thresh.
 #define RESET_THRESHOLD    5    // only consider “home” if within ±5 counts of zero
-#define RESET_HOLD_MS     50    // must hold for 20 ms before we call it done
+#define RESET_HOLD_MS     100    // must hold for 20 ms before we call it done
 
 static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f}; // set the levels of B coeff for vsicous force fields
 // -----------------------------------------------------------------------------
