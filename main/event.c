@@ -13,18 +13,18 @@ static gpio_num_t             s_pin       = GPIO_NUM_NC;
 
 // Pulse widths (µs) for each event_state_t
 static const uint32_t EVENT_WIDTH_US[EVENT_STATE_COUNT] = {
-    [INIT]     =  167,
-    [CUE_0]    = 500,
-    [CUE_1]    = 200,
-    [CUE_2]    = 400,
-    [CUE_3]    = 300,
-    [MOVING]   = 800,
-    [REWARD_0] = 433,
-    [REWARD_1] = 566,
-    [REWARD_2] = 333,
-    [REWARD_3] = 633,
-    [TIMEOUT]  = 733,
-    [RESET]    = 267
+    [INIT]     =  333,
+    [CUE_0]    = 1000,
+    [CUE_1]    = 400,
+    [CUE_2]    = 800,
+    [CUE_3]    = 600,
+    [MOVING]   = 1600,
+    [REWARD_0] = 866,
+    [REWARD_1] = 1132,
+    [REWARD_2] = 665,
+    [REWARD_3] = 1266,
+    [TIMEOUT]  = 1466,
+    [RESET]    = 533
 };
 
 esp_err_t event_init_rmt(gpio_num_t pin, uint32_t resolution_hz)
@@ -82,3 +82,4 @@ esp_err_t event_send_state(event_state_t st)
         &cfg
     );
 }
+
