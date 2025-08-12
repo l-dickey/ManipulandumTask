@@ -56,6 +56,7 @@
 
 // If your encoder sign is opposite, set this to -1 to flip the target comparison.
 #define ENCODER_SIGN              (+1)
+#define TARGET_SIGN               (-1)
 
 // PID gains (unchanged unless you want tweaks)
 static float kp = 0.21f;
@@ -63,7 +64,7 @@ static float ki = 0.001f;
 static float kd = 0.003f;
 
 // (Not used during MOVING—viscous field is disabled as requested)
-static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f};
+// static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f};
 
 // ── Types / globals ───────────────────────────────────────────────────────────
 typedef enum { TRIAL_CORRECT=0, TRIAL_TIMEOUT } trial_outcome_t;
@@ -294,7 +295,7 @@ void simplified_trial_task(void *pv)
 
                 // Prime autocomplete
                 sp_current = (float)pos;           // start where we are
-                sp_target  = (float)(ENCODER_SIGN * AUTOTARGET_COUNTS);
+                sp_target  = (float)(ENCODER_SIGN * AUTOTARGET_COUNTS * TARGET_SIGN);
                 ac_started = false;
                 ac_start_ts = now;                 // we’ll wait 100 ms
                 state     = S_MOVING;
@@ -305,12 +306,21 @@ void simplified_trial_task(void *pv)
 
         // ───────────── MOVING (AUTOCOMPLETE) ────────────
         case S_MOVING: {
+            // Flip target once when we begin the ramp so we move in the opposite direction.
+            // No other code changes needed elsewhere.
+            static bool dir_fixed = false;
+
             // Wait AUTOCOMPLETE_DELAY_MS after cue before beginning ramp
             if (!ac_started && (now - ac_start_ts) >= pdMS_TO_TICKS(AUTOCOMPLETE_DELAY_MS)) {
                 ac_started = true;
             }
+            if (ac_started && !dir_fixed) {
+                // Force target negative (opposite direction) regardless of ENCODER_SIGN
+                sp_target = -fabsf(sp_target);
+                dir_fixed = true;
+            }
 
-            // Ramp setpoint toward target at AUTOCOMPLETE_SPEED_CPS
+            // Ramp setpoint toward (now negative) target at AUTOCOMPLETE_SPEED_CPS
             if (AUTOCOMPLETE_ENABLED && ac_started) {
                 float dt_s = (float)loop_period / 1000.0f; // 2 ms = 0.002 s
                 float step = AUTOCOMPLETE_SPEED_CPS * dt_s;
@@ -326,10 +336,15 @@ void simplified_trial_task(void *pv)
                 apply_control_mcpwm(0.0f);
             }
 
-            // Threshold crossing & hold (>= target since target is positive)
-            if (pos >= (int32_t)sp_target) {
-                if (hold_ts == 0) hold_ts = now;
-                else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+            // Threshold crossing & hold — sign-aware (works for negative or positive targets)
+            bool at_or_past_target = (sp_target >= sp_current)
+                                    ? (pos >= (int32_t)sp_target)
+                                    : (pos <= (int32_t)sp_target);
+
+            if (at_or_past_target) {
+                if (hold_ts == 0) {
+                    hold_ts = now;
+                } else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
                     state     = S_REWARD;
                     state_ts  = now;
                     first_entry = true;
@@ -349,6 +364,7 @@ void simplified_trial_task(void *pv)
             }
             break;
         }
+
 
         // ───────────── REWARD ────────────
         case S_REWARD: {
