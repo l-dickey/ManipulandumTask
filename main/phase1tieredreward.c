@@ -381,12 +381,13 @@ static void pulse_reward_ttl() {
         static int         pulses_done;
         static bool        pin_state;
         static TickType_t  last_toggle;
+        const  int         pulse_plus_one = rewardType +1; // this allows for change in reward paradigm from 0-3 to 1-4
 
         // how long each HIGH or LOW phase lasts
         const TickType_t PHASE_MS = pdMS_TO_TICKS(500);
 
         // ----- special “zero reward” case: just wait one PHASE_MS then reset -----
-        if (rewardType == 0) {
+        if (pulse_plus_one == 0) {
             if (first_entry) {
                 first_entry  = false;
                 last_toggle  = now;
@@ -424,7 +425,7 @@ static void pulse_reward_ttl() {
         else if (!pin_state && dt >= PHASE_MS) {
             // end of LOW → either start next HIGH or finish
             pulses_done++;
-            if (pulses_done < rewardType) {
+            if (pulses_done < pulse_plus_one) {
                 // next HIGH + tone
                 gpio_set_level(GPIO_REWARD_SIGNAL, 1);
                 init_ledc(reward_freq);
@@ -542,4 +543,5 @@ void app_main(void)
     NULL,
     /*core=*/0
 );
+
 }
