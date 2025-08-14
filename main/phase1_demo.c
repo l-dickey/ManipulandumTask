@@ -58,9 +58,9 @@
 #define ENCODER_SIGN              (+1)
 #define TARGET_SIGN               (-1)
 
-// PID gains (unchanged unless you want tweaks)
-static float kp = 0.21f;
-static float ki = 0.001f;
+// PID gains 
+static float kp = 0.23f;
+static float ki = 0.002f; // 
 static float kd = 0.003f;
 
 // (Not used during MOVING—viscous field is disabled as requested)
@@ -271,7 +271,9 @@ void simplified_trial_task(void *pv)
 
                 // Prepare PID
                 pid_init(kp, ki, kd, 0, 0, 0.002f, 5);
-
+                sm_enter(S_CUE, CUE_EVENT[rewardType]);
+                state     = S_CUE;
+                state_ts  = now;
                 first_entry  = false;
             }
 
@@ -298,6 +300,7 @@ void simplified_trial_task(void *pv)
                 sp_target  = (float)(ENCODER_SIGN * AUTOTARGET_COUNTS * TARGET_SIGN);
                 ac_started = false;
                 ac_start_ts = now;                 // we’ll wait 100 ms
+                sm_enter(S_MOVING, MOVING);
                 state     = S_MOVING;
                 state_ts  = now;
                 first_entry = true;
@@ -345,6 +348,7 @@ void simplified_trial_task(void *pv)
                 if (hold_ts == 0) {
                     hold_ts = now;
                 } else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+                    sm_enter(S_REWARD, REW_EVENT[rewardType]);
                     state     = S_REWARD;
                     state_ts  = now;
                     first_entry = true;
@@ -410,6 +414,7 @@ void simplified_trial_task(void *pv)
                     last_toggle = now;
                 } else {
                     se = true;
+                    sm_enter(S_RESET, RESET);
                     state = S_RESET;
                     state_ts = now;
                 }
@@ -445,6 +450,7 @@ void simplified_trial_task(void *pv)
 
                     if (now - state_ts >= pdMS_TO_TICKS(RESET_DELAY_MS)) {
                         home_hold_ts = 0;
+                        sm_enter(S_INIT, INIT);
                         state = S_INIT;
                         state_ts = now;
                         first_entry = true;
