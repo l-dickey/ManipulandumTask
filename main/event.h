@@ -11,3 +11,6 @@ typedef enum {
 
 esp_err_t event_init_rmt(gpio_num_t pin, uint32_t resolution_hz);
 esp_err_t event_send_state(event_state_t st);
+esp_err_t event_send_state_immediate(event_state_t st);
+uint32_t event_get_queue_waiting(void);
+esp_err_t event_deinit(void);
