@@ -320,12 +320,12 @@ static void pulse_reward_ttl() {
                 motorctrl_init_viscous(0.002f, 0.02f, B_level[rewardType]);
                 first_entry  = false;
             }
-            // immediately cue
+           if (now - state_ts >= pdMS_TO_TICKS(10)) {   // ~10 ms separation
             sm_enter(S_CUE, CUE_EVENT[rewardType]);
             state     = S_CUE;
             state_ts  = now;
             first_entry = true;
-            break;
+            }
 
         // ───────────── CUE ──────────────
         case S_CUE:
@@ -545,3 +545,4 @@ void app_main(void)
 );
 
 }
+
