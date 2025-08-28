@@ -326,6 +326,7 @@ static void pulse_reward_ttl() {
             state_ts  = now;
             first_entry = true;
             }
+            break;
 
         // ───────────── CUE ──────────────
         case S_CUE:
@@ -545,4 +546,5 @@ void app_main(void)
 );
 
 }
+
 
