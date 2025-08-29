@@ -23,12 +23,15 @@ typedef enum {
 // Track the current state
 static sm_state_t _sm_current = S_INIT;
 
-/**
- * Jump into `next` (once), firing the RMT event pulse.
- */
-static inline void sm_enter(sm_state_t next, event_state_t ev_code)
-{
+/* Emit the state marker immediately (deterministic, no queue). */
+static inline void sm_enter(sm_state_t next, event_state_t ev_code) {
     if (_sm_current == next) return;
-    ESP_ERROR_CHECK(event_send_state(ev_code));
+    ESP_ERROR_CHECK(event_send_state_immediate(ev_code));
+    _sm_current = next;
+}
+
+/* Move between SM states WITHOUT emitting (use when you already emitted). */
+static inline void sm_enter_no_emit(sm_state_t next) {
+    if (_sm_current == next) return;
     _sm_current = next;
 }
