@@ -41,17 +41,19 @@
 #define UI_TASK_PERIOD_MS   10
 #define SCREEN_WIDTH        1024
 #define SCREEN_HEIGHT       600
-#define REWARD_HOLD_MS 50 // how long to hold past encoder count thresh.
+#define REWARD_HOLD_MS 100 // how long to hold past encoder count thresh.
 #define RESET_THRESHOLD    5    // only consider “home” if within ±5 counts of zero
 #define RESET_HOLD_MS     100    // must hold for 20 ms before we call it done
+#define HANDLE_EARLY_CUE_REWARD 1   // 1 = enable cue→reward direct path (single REWARD pulse)
+
 
 static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f}; // set the levels of B coeff for vsicous force fields
 // -----------------------------------------------------------------------------
 // global flag for PID‐homing
 static volatile bool homing_active = false;
 static float kp = 0.21;
-static float ki = 0.001;
-static float kd = 0.003;
+static float ki = 0.003;
+static float kd = 0.005;
 // -----------------------------------------------------------------------------
 
 
@@ -320,8 +322,10 @@ static void pulse_reward_ttl() {
                 motorctrl_init_viscous(0.002f, 0.02f, B_level[rewardType]);
                 first_entry  = false;
             }
-           if (now - state_ts >= pdMS_TO_TICKS(10)) {   // ~10 ms separation
+            
+            if (now - state_ts >= pdMS_TO_TICKS(50)) {   // ~10 ms separation
             sm_enter(S_CUE, CUE_EVENT[rewardType]);
+            
             state     = S_CUE;
             state_ts  = now;
             first_entry = true;
@@ -330,22 +334,52 @@ static void pulse_reward_ttl() {
 
         // ───────────── CUE ──────────────
         case S_CUE:
-            if (first_entry) {
-                if (rewardType > 0) show_grating_for(rewardType);
-                init_ledc(cue_freqs[rewardType]);
-                first_entry = false;
-            }
-            if (now - state_ts >= pdMS_TO_TICKS(CUE_DURATION_MS)) {
+        if (first_entry) {
+            if (rewardType > 0) show_grating_for(rewardType);
+            init_ledc(cue_freqs[rewardType]);   // cue tone/visuals
+            first_entry = false;
+        }
+
+    #if HANDLE_EARLY_CUE_REWARD
+        // Early-response path: if lever is held past threshold during the cue window
+        if (pos < ENCODER_THRESHOLD) {
+            if (hold_ts == 0) hold_ts = now;
+            else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+                // End cue visuals/audio
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
                 hide_all_gratings();
-                motor_locked = false;
-                sm_enter(S_MOVING, MOVING);
-                state     = S_MOVING;
-                state_ts  = now;
+
+                // Emit exactly ONE reward marker here (skip MOVING marker)
+                (void)event_send_state_immediate(REW_EVENT[rewardType]);
+
+                // Transition to S_REWARD WITHOUT emitting again
+                sm_enter_no_emit(S_REWARD);
+                state       = S_REWARD;
+                state_ts    = now;
                 first_entry = true;
+                hold_ts     = 0;
+                break;
             }
-            break;
+        } else {
+            hold_ts = 0;
+        }
+    #endif
+
+        // Normal end-of-cue → MOVING path
+        if (now - state_ts >= pdMS_TO_TICKS(CUE_DURATION_MS)) {
+            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+            hide_all_gratings();
+            motor_locked = false;
+
+            sm_enter(S_MOVING, MOVING);     // emits MOVING marker
+            state       = S_MOVING;
+            state_ts    = now;
+            first_entry = true;
+        }
+        break;
+
 
         // ───────────── MOVING ────────────
         case S_MOVING:
@@ -375,73 +409,57 @@ static void pulse_reward_ttl() {
             }
             break;
 
-        // ───────────── REWARD ────────────
-      case S_REWARD: {
-        // persist across calls in S_REWARD
-        static bool        first_entry = true;
-        static int         pulses_done;
-        static bool        pin_state;
-        static TickType_t  last_toggle;
-        const  int         pulse_plus_one = rewardType +1; // this allows for change in reward paradigm from 0-3 to 1-4
+       // ───────────── REWARD ────────────
+        case S_REWARD: {
+            // Uses outer `first_entry` (no shadowing). Event marker is emitted at transition.
+            static int        pulses_done;
+            static bool       pin_high;
+            static TickType_t last_toggle;
 
-        // how long each HIGH or LOW phase lasts
-        const TickType_t PHASE_MS = pdMS_TO_TICKS(500);
+            const int        pulses_plus_one = rewardType + 1;      // reward_0→1 drop, reward_1→2, etc.
+            const TickType_t PHASE_MS        = pdMS_TO_TICKS(500);  // HIGH then LOW per pulse
 
-        // ----- special “zero reward” case: just wait one PHASE_MS then reset -----
-        if (pulse_plus_one == 0) {
             if (first_entry) {
-                first_entry  = false;
-                last_toggle  = now;
-            }
-            else if (now - last_toggle >= PHASE_MS) {
-                first_entry = true;
-                sm_enter(S_RESET, RESET);
-                state      = S_RESET;
-                state_ts   = now;
-            }
-            break;
-        }
+                first_entry = false;
 
-        // ----- rewardType > 0 case -----
-        if (first_entry) {
-            // start the first HIGH phase + tone
-            pulses_done     = 0;
-            pin_state       = true;                // we’re in HIGH
-            gpio_set_level(GPIO_REWARD_SIGNAL, 1);
-            init_ledc(reward_freq);
-            last_toggle     = now;
-            first_entry     = false;
-            break;
-        }
-
-        TickType_t dt = now - last_toggle;
-        if (pin_state && dt >= PHASE_MS) {
-            // end of HIGH → go LOW, stop tone
-            gpio_set_level(GPIO_REWARD_SIGNAL, 0);
-            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-            pin_state   = false;
-            last_toggle = now;
-        }
-        else if (!pin_state && dt >= PHASE_MS) {
-            // end of LOW → either start next HIGH or finish
-            pulses_done++;
-            if (pulses_done < pulse_plus_one) {
-                // next HIGH + tone
-                gpio_set_level(GPIO_REWARD_SIGNAL, 1);
-                init_ledc(reward_freq);
-                pin_state   = true;
+                // start first HIGH phase (tone + pump TTL)
+                pulses_done = 0;
+                pin_high    = true;
+                gpio_set_level(GPIO_REWARD_SIGNAL, 1);   // pump on
+                init_ledc(reward_freq);                  // reward tone on
                 last_toggle = now;
-            } else {
-                // all pulses done → cleanup & advance
-                first_entry = true;
-                sm_enter(S_RESET, RESET);
-                state     = S_RESET;
-                state_ts  = now;
+                break;
             }
+
+            TickType_t dt = now - last_toggle;
+
+            if (pin_high && dt >= PHASE_MS) {
+                // HIGH → LOW (end one half-cycle)
+                gpio_set_level(GPIO_REWARD_SIGNAL, 0);   // pump off
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+                pin_high   = false;
+                last_toggle = now;
+            } else if (!pin_high && dt >= PHASE_MS) {
+                // Completed one full pulse (HIGH+LOW)
+                pulses_done++;
+                if (pulses_done < pulses_plus_one) {
+                    // next pulse: go HIGH again (tone + pump)
+                    gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+                    init_ledc(reward_freq);
+                    pin_high    = true;
+                    last_toggle = now;
+                } else {
+                    // all pulses completed → advance
+                    first_entry = true;
+                    sm_enter(S_RESET, RESET);   // emits RESET marker
+                    state     = S_RESET;
+                    state_ts  = now;
+                }
+            }
+            break;
         }
-        break;
-    }
+
 
 
         // ───────────── TIMEOUT ───────────
@@ -544,7 +562,4 @@ void app_main(void)
     NULL,
     /*core=*/0
 );
-
 }
-
-
