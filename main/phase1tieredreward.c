@@ -503,7 +503,7 @@ static void pulse_reward_ttl() {
                     state_ts  = now;
                     first_entry = true;
                 }
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(1500));
             }
             break;
         }
@@ -564,4 +564,3 @@ void app_main(void)
     /*core=*/0
 );
 }
-
