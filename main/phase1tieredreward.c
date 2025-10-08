@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -34,27 +35,28 @@
 #define GPIO_REWARD_SIGNAL  3
 #define GPIO_EVENT_PIN      4
 #define ENCODER_THRESHOLD   -27
-#define CUE_DURATION_MS     500
+#define INTERTRIAL_DELAY    500
+#define CUE_TONE_MS         500
+#define CUE_DELAY_MIN_MS    150
+#define CUE_DELAY_MAX_MS    350
+#define GO_CUE_MS           100
+#define GO_CUE_FREQ         4000
 #define TRIAL_TIMEOUT_MS    3000
 #define RESET_DELAY_MS      1000
 #define STACK_SIZE          16384
 #define UI_TASK_PERIOD_MS   10
 #define SCREEN_WIDTH        1024
 #define SCREEN_HEIGHT       600
-#define REWARD_HOLD_MS 100 // how long to hold past encoder count thresh.
-#define RESET_THRESHOLD    5    // only consider “home” if within ±5 counts of zero
-#define RESET_HOLD_MS     100    // must hold for 20 ms before we call it done
-#define HANDLE_EARLY_CUE_REWARD 1   // 1 = enable cue→reward direct path (single REWARD pulse)
+#define REWARD_HOLD_MS      100
+#define RESET_THRESHOLD     5
+#define RESET_HOLD_MS       100
+#define HANDLE_EARLY_CUE_REWARD 1 // yes
+#define HIGH_TORQUE         85.0f
+#define LOW_TORQUE          5.0f
 
-
-static const float B_level[4] = {0.003f, 0.003f, 0.003f, 0.003f}; // set the levels of B coeff for vsicous force fields
-// -----------------------------------------------------------------------------
-// global flag for PID‐homing
-static volatile bool homing_active = false;
-static float kp = 0.21;
-static float ki = 0.003;
-static float kd = 0.005;
-// -----------------------------------------------------------------------------
+// Grating parameters
+#define GRATING_SPACING     200  // pixels between stripes
+#define GRATING_WIDTH       120  // width of each stripe in pixels
 
 
 typedef enum {
@@ -66,23 +68,25 @@ typedef enum {
 static SemaphoreHandle_t encoder_mutex;
 static volatile int32_t  current_encoder_value;
 
-static lv_obj_t *grating1, *grating2, *grating3;
+static lv_obj_t *grating_canvas;
 static lv_obj_t *lever_indicator;
 static lv_obj_t *trial_info_label;
-static lv_obj_t *create_grating_pattern(lv_obj_t *parent, int stripes);
-static void hide_all_gratings(void);
-
+static void draw_grating(int angle_deg);
+static void hide_grating(void);
 
 static uint32_t trial_number;
 static uint32_t session_correct;
 static uint32_t session_total;
+static int  g_thresh_x = -1;     // pixel column of the encoder threshold
+static bool g_mask_left = true;  // true = hide left of boundary; false = hide right
 
 bool motor_locked = false;
 
-// cue frequencies for rewardType = 0..3
-static const uint32_t cue_freqs[4] = { 500, 1000, 2000, 3000 };
-
+// cue frequencies for rewardType = 1..3 (index 0..2)
+static const uint32_t cue_freqs[3] = { 500, 1000, 2000 };
 static const uint32_t reward_freq = 5000;
+
+// Grating angles defined in create_angled_grating() - 90°, 45°, 135°
 
 // send CSV over UART / printf
 static void send_trial_data(trial_outcome_t outcome,
@@ -112,54 +116,134 @@ static void update_trial_display(void)
                   ? ((float)session_correct / session_total)*100.0f
                   : 0.0f;
     lv_label_set_text_fmt(trial_info_label,
-        "Trial: %lu\nCorrect: %lu/%lu\nSuccess: %.1f%%",
+        "Trial: %lu\nCorrect: %lu/%lu\n",
         trial_number,
         session_correct,
-        session_total,
-        success);
+        session_total
+        );
     lvgl_unlock();
 }
 
-// create a grating container with `stripes` green bars
-static lv_obj_t *create_grating_pattern(lv_obj_t *parent, int stripes)
-{
-    int sw = SCREEN_WIDTH / stripes;
-    lv_obj_t *cont = lv_obj_create(parent);
-    lv_obj_remove_style_all(cont);
-    lv_obj_set_size(cont, SCREEN_WIDTH, SCREEN_HEIGHT);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(0x000000), 0);
+static inline int enc_to_screen_x(int enc_counts) {
+    // NOTE: your lever UI multiplies by -1 before mapping; do the same here.
+    const int32_t center = SCREEN_WIDTH/2;
+    const int32_t span   = SCREEN_WIDTH/2 - 25;     // keep in sync with ui_update_task
+    int32_t pos = -enc_counts;
+    int32_t x   = center + (pos * span) / 200;      // 200 = your working full-range counts
+    if (x < 0) x = 0;
+    if (x > SCREEN_WIDTH-1) x = SCREEN_WIDTH-1;
+    return (int)x;
+}
 
-    for (int i = 0; i < stripes; i += 2) {
-        lv_obj_t *s = lv_obj_create(cont);
-        lv_obj_remove_style_all(s);
-        lv_obj_set_size(s, sw, SCREEN_HEIGHT);
-        lv_obj_set_pos(s, i*sw, 0);
-        lv_obj_set_style_bg_color(s, lv_color_hex(0x00FF00), 0);
-        lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
+// Call once (or whenever threshold/orientation changes)
+static void set_grating_threshold_from_counts(int threshold_counts, bool hide_left_side) {
+    g_thresh_x  = enc_to_screen_x(threshold_counts);
+    g_mask_left = hide_left_side;
+}
+
+static void draw_threshold_marker(lv_obj_t *canvas) {
+    if (g_thresh_x < 0) return;
+    lv_color_t white = lv_color_hex(0x00FF00);
+    // A 2-px line for visibility
+    for (int x = g_thresh_x; x <= g_thresh_x + 1 && x < SCREEN_WIDTH; x++) {
+        for (int y = 0; y < SCREEN_HEIGHT; y++) {
+            lv_canvas_set_px(canvas, x, y, white, LV_OPA_COVER);
+        }
     }
-    return cont;
 }
 
-// hide all three gratings
-static void hide_all_gratings(void)
+
+// Draw an angled grating pattern on the shared canvas
+static void draw_grating(int angle_deg)
 {
-    if (!lvgl_lock(10)) return;
-    lv_obj_add_flag(grating1, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(grating2, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(grating3, LV_OBJ_FLAG_HIDDEN);
+    if (!grating_canvas || !lvgl_lock(100)) return;
+
+    // Compute the boundary the first time if not set
+    if (g_thresh_x < 0) {
+        set_grating_threshold_from_counts(ENCODER_THRESHOLD, /*hide_left_side=*/true);
+    }
+
+    // 1) full black background
+    lv_canvas_fill_bg(grating_canvas, lv_color_hex(0x000000), LV_OPA_COVER);
+
+    // 2) draw angled grating, but CLIPPED at g_thresh_x
+    float angle_rad  = (angle_deg * M_PI) / 180.0f;
+    float cos_angle  = cosf(angle_rad);
+    float sin_angle  = sinf(angle_rad);
+    int   max_dim    = (int)sqrtf(SCREEN_WIDTH * SCREEN_WIDTH + SCREEN_HEIGHT * SCREEN_HEIGHT);
+    int   num_lines  = (max_dim / GRATING_SPACING) * 2;
+    int   cx         = SCREEN_WIDTH / 2;
+    int   cy         = SCREEN_HEIGHT / 2;
+    lv_color_t green = lv_color_hex(0x00FF00);
+    int   half_width = GRATING_WIDTH / 2;
+
+    float line_angle = angle_rad + M_PI / 2.0f;
+    float perp_cos   = cosf(line_angle);
+    float perp_sin   = sinf(line_angle);
+
+    for (int i = -num_lines/2; i <= num_lines/2; i++) {
+        int offset  = i * GRATING_SPACING;
+        int start_x = cx + (int)(offset * cos_angle) - (int)(max_dim * perp_cos);
+        int start_y = cy + (int)(offset * sin_angle) - (int)(max_dim * perp_sin);
+        int end_x   = cx + (int)(offset * cos_angle) + (int)(max_dim * perp_cos);
+        int end_y   = cy + (int)(offset * sin_angle) + (int)(max_dim * perp_sin);
+
+        int dx = abs(end_x - start_x);
+        int dy = abs(end_y - start_y);
+        int sx = (start_x < end_x) ? 1 : -1;
+        int sy = (start_y < end_y) ? 1 : -1;
+        int err = dx - dy;
+
+        int x = start_x, y = start_y;
+        while (1) {
+            // thicken line
+            for (int w = -half_width; w <= half_width; w++) {
+                int px = (dx > dy) ? x : (x + w);
+                int py = (dx > dy) ? (y + w) : y;
+
+                if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
+                    // ── the clip: only draw on the “past-threshold” side ──
+                    bool on_hidden_side = g_mask_left ? (px < g_thresh_x) : (px > g_thresh_x);
+                    if (!on_hidden_side) {
+                        lv_canvas_set_px(grating_canvas, px, py, green, LV_OPA_COVER);
+                    }
+                }
+            }
+
+            if (x == end_x && y == end_y) break;
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x += sx; }
+            if (e2 <  dx) { err += dx; y += sy; }
+        }
+    }
+    draw_threshold_marker(grating_canvas);
+    // 4) show
+    lv_obj_clear_flag(grating_canvas, LV_OBJ_FLAG_HIDDEN);
     lvgl_unlock();
 }
 
-// show only the grating for rewardType 1..3, none for 0
-static void show_grating_for(int reward)
+
+// Hide the grating canvas
+static void hide_grating(void)
 {
     if (!lvgl_lock(10)) return;
-    lv_obj_add_flag(grating1, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(grating2, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(grating3, LV_OBJ_FLAG_HIDDEN);
-    if      (reward == 1) lv_obj_clear_flag(grating1, LV_OBJ_FLAG_HIDDEN);
-    else if (reward == 2) lv_obj_clear_flag(grating2, LV_OBJ_FLAG_HIDDEN);
-    else if (reward == 3) lv_obj_clear_flag(grating3, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(grating_canvas, LV_OBJ_FLAG_HIDDEN);
+    lvgl_unlock();
+}
+
+// hide the lever indicator
+static void hide_lever_indicator(void)
+{
+    if (!lvgl_lock(10)) return;
+    lv_obj_add_flag(lever_indicator, LV_OBJ_FLAG_HIDDEN);
+    lvgl_unlock();
+}
+
+// show the lever indicator
+static void show_lever_indicator(void)
+{
+    if (!lvgl_lock(10)) return;
+    lv_obj_clear_flag(lever_indicator, LV_OBJ_FLAG_HIDDEN);
     lvgl_unlock();
 }
 
@@ -211,36 +295,30 @@ void ui_update_task(void *pv)
     }
 }
 
-// play audio + visual during cue
-static void play_audio_and_visual_cue(uint32_t freq, uint32_t ms)
-{
-    if (lvgl_lock(10)) {
-        show_grating_for(0);  // temporarily show something? optional
-        lvgl_unlock();
-    }
-    init_ledc(freq);
-    vTaskDelay(pdMS_TO_TICKS(ms));
-    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-    if (lvgl_lock(10)) {
-        hide_all_gratings();
-        lvgl_unlock();
-    }
-}
 
 static void create_simple_ui(lv_display_t *display) {
     // 1) black background
     lv_obj_t *scr = lv_disp_get_scr_act(display);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
 
-    // 2) create three gratings for reward levels 1..3
-    //    (stripe counts: 3, 7, and 13 are from your earlier design)
-    grating1 = create_grating_pattern(scr,  13);
-    grating2 = create_grating_pattern(scr,  7);
-    grating3 = create_grating_pattern(scr, 3);
-    hide_all_gratings();  // start hidden
+    // 2) Create single canvas for gratings with dynamically allocated buffer
+    static lv_color_t *canvas_buf = NULL;
+    if (!canvas_buf) {
+        canvas_buf = heap_caps_malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(lv_color_t), 
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!canvas_buf) {
+            ESP_LOGE(TAG, "Failed to allocate canvas buffer!");
+            return;
+        }
+    }
+    set_grating_threshold_from_counts(ENCODER_THRESHOLD, /*hide_left_side=*/false);
+    
+    grating_canvas = lv_canvas_create(scr);
+    lv_canvas_set_buffer(grating_canvas, canvas_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_fill_bg(grating_canvas, lv_color_hex(0x000000), LV_OPA_COVER);
+    lv_obj_add_flag(grating_canvas, LV_OBJ_FLAG_HIDDEN);
 
-    // 3) lever indicator in center
+    // 3) lever indicator in center (start hidden)
     lever_indicator = lv_obj_create(scr);
     lv_obj_remove_style_all(lever_indicator);
     lv_obj_set_size(lever_indicator, 50, 200);
@@ -249,55 +327,36 @@ static void create_simple_ui(lv_display_t *display) {
     lv_obj_set_pos(lever_indicator,
                    SCREEN_WIDTH/2 - 25,
                    SCREEN_HEIGHT/2 - 100);
+    lv_obj_add_flag(lever_indicator, LV_OBJ_FLAG_HIDDEN);
 
     // 4) trial info label at top-left
     trial_info_label = lv_label_create(scr);
-    lv_obj_set_pos(trial_info_label, 20, 20);
+    lv_obj_set_pos(trial_info_label, 20, 15);
     lv_obj_set_style_text_color(trial_info_label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_color(trial_info_label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(trial_info_label, LV_OPA_70, 0);
-    lv_obj_set_style_pad_all(trial_info_label, 10, 0);
+    lv_obj_set_style_pad_all(trial_info_label, 5, 0);
     lv_label_set_text(trial_info_label,
         "Trial: 0\nCorrect: 0/0\nSuccess: 0.0%");
 }
 
-static void pid_task(void *pv)
+
+void simplified_trial_task(void *pv)
 {
-    const TickType_t period = pdMS_TO_TICKS(2); // 500 Hz
-    TickType_t next = xTaskGetTickCount();
-
-    while (1) {
-        // grab the latest encoder count under mutex
-        int32_t pos;
-        xSemaphoreTake(encoder_mutex, portMAX_DELAY);
-          pos = current_encoder_value;
-        xSemaphoreGive(encoder_mutex);
-
-        // always home toward zero during RESET state only:
-        // (you can gate this with a flag if needed)
-        pid_step(pos, 0);
-
-        vTaskDelayUntil(&next, period);
-    }
-}
-
-static void pulse_reward_ttl() {
-    gpio_set_level(GPIO_REWARD_SIGNAL, 1);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    gpio_set_level(GPIO_REWARD_SIGNAL, 0);
-}
-
-    void simplified_trial_task(void *pv)
-{
-    const TickType_t loop_period = pdMS_TO_TICKS(2);  // 500 Hz
+    const TickType_t loop_period = pdMS_TO_TICKS(2);  // 500 Hz
     TickType_t next = xTaskGetTickCount();
 
     sm_state_t   state        = S_INIT;
     TickType_t   state_ts     = next;
     TickType_t   hold_ts      = 0;
-    int          rewardType   = 0;
-    const int32_t targetPos   = 0;
+    int          rewardType   = 0;  // Now 1-3
+    uint32_t     cue_delay_ms = 0;  // Random delay duration
     bool         first_entry  = true;
+    
+    // Track trial outcome and timing
+    trial_outcome_t trial_outcome = TRIAL_CORRECT;
+    TickType_t go_start_time = 0;      // When GO state started
+    TickType_t threshold_cross_time = 0; // When threshold was crossed
 
     while(1) {
         TickType_t now = xTaskGetTickCount();
@@ -315,93 +374,135 @@ static void pulse_reward_ttl() {
         // ───────────── INIT ─────────────
         case S_INIT:
             if (first_entry) {
-                trial_number++;  session_total++;
-                hide_all_gratings();
-                rewardType   = rand() % 4;
+                trial_number++;  
+                session_total++;
+                hide_grating();
+                hide_lever_indicator();
+                
+                // Reset trial tracking variables
+                trial_outcome = TRIAL_CORRECT;
+                go_start_time = 0;
+                threshold_cross_time = 0;
+                
+                // Reward type is now 1-3 (array index 0-2)
+                rewardType = 1 + (rand() % 3);
+                
+                // Generate random delay for CUE state (100-350ms)
+                cue_delay_ms = CUE_DELAY_MIN_MS + 
+                               (esp_random() % (CUE_DELAY_MAX_MS - CUE_DELAY_MIN_MS + 1));
+                
                 motor_locked = true;
-                motorctrl_init_viscous(0.002f, 0.02f, B_level[rewardType]);
                 first_entry  = false;
             }
             
-            if (now - state_ts >= pdMS_TO_TICKS(50)) {   // ~10 ms separation
-            sm_enter(S_CUE, CUE_EVENT[rewardType]);
-            
-            state     = S_CUE;
-            state_ts  = now;
-            first_entry = true;
+            if (now - state_ts >= pdMS_TO_TICKS(50)) {
+                sm_enter(S_CUE, CUE_EVENT[rewardType-1]);
+                state     = S_CUE;
+                state_ts  = now;
+                first_entry = true;
             }
             break;
 
         // ───────────── CUE ──────────────
         case S_CUE:
-        if (first_entry) {
-            if (rewardType > 0) show_grating_for(rewardType);
-            init_ledc(cue_freqs[rewardType]);   // cue tone/visuals
-            first_entry = false;
-        }
-
-    #if HANDLE_EARLY_CUE_REWARD
-        // Early-response path: if lever is held past threshold during the cue window
-        if (pos < ENCODER_THRESHOLD) {
-            if (hold_ts == 0) hold_ts = now;
-            else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
-                // End cue visuals/audio
-                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-                hide_all_gratings();
-
-                // Emit exactly ONE reward marker here (skip MOVING marker)
-                (void)event_send_state_immediate(REW_EVENT[rewardType]);
-
-                // Transition to S_REWARD WITHOUT emitting again
-                sm_enter_no_emit(S_REWARD);
-                state       = S_REWARD;
-                state_ts    = now;
-                first_entry = true;
-                hold_ts     = 0;
-                break;
+            if (first_entry) {
+                // Draw the appropriate grating (90°, 45°, or 135°)
+                int angles[3] = {90, 45, 135};
+                draw_grating(angles[rewardType-1]);
+                init_ledc(cue_freqs[rewardType-1]);
+                first_entry = false;
             }
-        } else {
-            hold_ts = 0;
-        }
-    #endif
 
-        // Normal end-of-cue → MOVING path
-        if (now - state_ts >= pdMS_TO_TICKS(CUE_DURATION_MS)) {
-            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-            ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-            hide_all_gratings();
-            motor_locked = false;
-
-            sm_enter(S_MOVING, MOVING);     // emits MOVING marker
-            state       = S_MOVING;
-            state_ts    = now;
-            first_entry = true;
-        }
-        break;
-
-
-        // ───────────── MOVING ────────────
-        case S_MOVING:
-            {
-                float u = motor_locked ? 0.0f : motorctrl_viscous(pos);
-                apply_control_mcpwm(u);
-                
-            }
-            // threshold‐crossing?
+        #if HANDLE_EARLY_CUE_REWARD
+            // Early-response path during entire CUE period (tone + delay)
             if (pos < ENCODER_THRESHOLD) {
                 if (hold_ts == 0) hold_ts = now;
                 else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
-                    sm_enter(S_REWARD, REW_EVENT[rewardType]);
-                    state     = S_REWARD;
-                    state_ts  = now;
+                    // Record threshold cross time
+                    threshold_cross_time = now;
+                    
+                    // End cue visuals/audio
+                    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+                    
+                    show_lever_indicator();
+
+                    // Emit exactly ONE reward marker here
+                    (void)event_send_state_immediate(REW_EVENT[rewardType-1]);
+
+                    // Transition to S_REWARD WITHOUT emitting again
+                    sm_enter_no_emit(S_REWARD);
+                    state       = S_REWARD;
+                    state_ts    = now;
                     first_entry = true;
+                    hold_ts     = 0;
+                    break;
                 }
             } else {
                 hold_ts = 0;
             }
-            // timeout‐fallback?
+        #endif
+
+            // After CUE_TONE_MS, stop audio/visual and enter blank delay
+            if (now - state_ts >= pdMS_TO_TICKS(CUE_TONE_MS)) {
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+                
+            }
+
+            // After tone + delay, transition to GO
+            if (now - state_ts >= pdMS_TO_TICKS(CUE_TONE_MS + cue_delay_ms)) {
+                motor_locked = false;
+                
+                sm_enter(S_GO, GO);  // Emit GO marker
+                state       = S_GO;
+                state_ts    = now;
+                go_start_time = now;  // Record GO start time
+                first_entry = true;
+            }
+            break;
+
+        // ───────────── GO (formerly MOVING) ────────────
+        case S_GO:
+            if (first_entry) {
+                // Play go cue tone
+                init_ledc(GO_CUE_FREQ);
+                
+                // Show lever indicator
+                show_lever_indicator();
+                
+                first_entry = false;
+            }
+            
+            // Stop go cue tone after GO_CUE_MS
+            if (now - state_ts >= pdMS_TO_TICKS(GO_CUE_MS)) {
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+            }
+            motor_ramp_set(LOW_TORQUE, 2);
+             
+            // Check for threshold crossing
+            if (pos < ENCODER_THRESHOLD) {
+                if (hold_ts == 0) hold_ts = now;
+                else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+                    threshold_cross_time = now;  // Record when threshold crossed
+                    trial_outcome = TRIAL_CORRECT;  // Mark as correct
+                    
+                    sm_enter(S_REWARD, REW_EVENT[rewardType-1]);
+                    state     = S_REWARD;
+                    state_ts  = now;
+                    first_entry = true;
+                    hold_ts   = 0;
+                }
+            } else {
+                hold_ts = 0;
+            }
+            
+            // Timeout check
             if (now - state_ts > pdMS_TO_TICKS(TRIAL_TIMEOUT_MS)) {
+                trial_outcome = TRIAL_TIMEOUT;  // Mark as timeout
+                threshold_cross_time = 0;  // No threshold cross
+                
                 sm_enter(S_TIMEOUT, TIMEOUT);
                 state     = S_TIMEOUT;
                 state_ts  = now;
@@ -411,48 +512,49 @@ static void pulse_reward_ttl() {
 
        // ───────────── REWARD ────────────
         case S_REWARD: {
-            // Uses outer `first_entry` (no shadowing). Event marker is emitted at transition.
             static int        pulses_done;
             static bool       pin_high;
             static TickType_t last_toggle;
 
-            const int        pulses_plus_one = rewardType + 1;      // reward_0→1 drop, reward_1→2, etc.
-            const TickType_t PHASE_MS        = pdMS_TO_TICKS(500);  // HIGH then LOW per pulse
+            const int        pulses_plus_one = rewardType;  // rewardType is 1-3
+            const TickType_t PHASE_MS        = pdMS_TO_TICKS(500);
 
             if (first_entry) {
                 first_entry = false;
 
-                // start first HIGH phase (tone + pump TTL)
+                // Start first HIGH phase
                 pulses_done = 0;
                 pin_high    = true;
-                gpio_set_level(GPIO_REWARD_SIGNAL, 1);   // pump on
-                init_ledc(reward_freq);                  // reward tone on
+                gpio_set_level(GPIO_REWARD_SIGNAL, 1);
+                init_ledc(reward_freq);
                 last_toggle = now;
+                
+                session_correct++;  // Count as correct trial
                 break;
             }
 
             TickType_t dt = now - last_toggle;
 
             if (pin_high && dt >= PHASE_MS) {
-                // HIGH → LOW (end one half-cycle)
-                gpio_set_level(GPIO_REWARD_SIGNAL, 0);   // pump off
+                // HIGH → LOW
+                gpio_set_level(GPIO_REWARD_SIGNAL, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
                 pin_high   = false;
                 last_toggle = now;
             } else if (!pin_high && dt >= PHASE_MS) {
-                // Completed one full pulse (HIGH+LOW)
+                // Completed one full pulse
                 pulses_done++;
                 if (pulses_done < pulses_plus_one) {
-                    // next pulse: go HIGH again (tone + pump)
+                    // Next pulse
                     gpio_set_level(GPIO_REWARD_SIGNAL, 1);
                     init_ledc(reward_freq);
                     pin_high    = true;
                     last_toggle = now;
                 } else {
-                    // all pulses completed → advance
+                    // All pulses done
                     first_entry = true;
-                    sm_enter(S_RESET, RESET);   // emits RESET marker
+                    sm_enter(S_RESET, RESET);
                     state     = S_RESET;
                     state_ts  = now;
                 }
@@ -460,15 +562,13 @@ static void pulse_reward_ttl() {
             break;
         }
 
-
-
         // ───────────── TIMEOUT ───────────
         case S_TIMEOUT:
             if (first_entry) {
-                // you could flash a “timeout” tone or LED here
+                // Timeout handling - don't increment session_correct
                 first_entry = false;
             }
-            // after a short pause, go home
+            
             if (now - state_ts >= pdMS_TO_TICKS(500)) {
                 sm_enter(S_RESET, RESET);
                 state     = S_RESET;
@@ -480,30 +580,37 @@ static void pulse_reward_ttl() {
         // ───────────── RESET ─────────────
         case S_RESET:
             if (first_entry) {
-                // arm your PID toward zero once
-                pid_init(kp, ki, kd,0,0,0.002,5);
-                first_entry = false;
-                printf(">> RESET: homing started\n");
-            }
-            // run one PID step (in‐line or via pid_task)
-            pid_step(pos, targetPos);
-            // once “home,” stop and wrap up trial
-            if (abs(pos - targetPos) <= RESET_THRESHOLD) {
-                apply_control_mcpwm(0);
+                // Hide lever indicator during reset
+                hide_grating();
+                
+                
+                // Calculate reaction time
+                uint32_t reaction_time_ms = 0;
+                if (trial_outcome == TRIAL_CORRECT && go_start_time > 0 && threshold_cross_time > 0) {
+                    reaction_time_ms = pdTICKS_TO_MS(threshold_cross_time - go_start_time);
+                }
+                
+                // Send trial data immediately when entering reset
                 send_trial_data(
-                  (rewardType>0) ? TRIAL_CORRECT : TRIAL_TIMEOUT,
-                  pdTICKS_TO_MS(now - state_ts),
-                  pos
+                    trial_outcome,
+                    reaction_time_ms,
+                    pos
                 );
                 update_trial_display();
-                // after a little hold, back to INIT
+                
+                motor_ramp_set(HIGH_TORQUE, 100);
+                first_entry = false;
+            }
+            
+            // Wait for lever to return to center position
+            if (pos >= 0) {
+                // Once centered, wait for reset delay before starting next trial
                 if (now - state_ts >= pdMS_TO_TICKS(RESET_DELAY_MS)) {
                     sm_enter(S_INIT, INIT);
                     state     = S_INIT;
                     state_ts  = now;
                     first_entry = true;
                 }
-                vTaskDelay(pdMS_TO_TICKS(1500));
             }
             break;
         }
@@ -511,37 +618,35 @@ static void pulse_reward_ttl() {
         vTaskDelayUntil(&next, loop_period);
     }
 }
-
 void app_main(void)
 {
     esp_log_level_set(TAG, ESP_LOG_INFO);
     ESP_LOGI(TAG, "Starting behavioral task…");
 
-    // setup reward pin
-    // reward_init(GPIO_REWARD_SIGNAL);
+    // Setup reward pin
     ESP_ERROR_CHECK(event_init_rmt(GPIO_EVENT_PIN, 1000000));
 
     gpio_config_t io_conf = {
-    .pin_bit_mask = 1ULL << GPIO_REWARD_SIGNAL ,
-    .mode         = GPIO_MODE_OUTPUT,
-    .pull_up_en   = GPIO_PULLUP_DISABLE,
-    .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    .intr_type    = GPIO_INTR_DISABLE
+        .pin_bit_mask = 1ULL << GPIO_REWARD_SIGNAL,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
-    gpio_set_level(GPIO_REWARD_SIGNAL,0);
-    // encoder + DAC
+    gpio_set_level(GPIO_REWARD_SIGNAL, 0);
+    
+    // Encoder + DAC
     encoder_mutex = xSemaphoreCreateMutex();
     init_encoder();
-    ESP_ERROR_CHECK( encoder_out_init() );
+    ESP_ERROR_CHECK(encoder_out_init());
 
-    // motor
+    // Motor
     init_mcpwm_highres();
+    motor_ramp_start(1);
     apply_control_mcpwm(0);
-    motorctrl_init_viscous(0.002f, 0.02f, 0.03f);
-    pid_init(0.21, 0.01,0.001,0,0,0.002,5);
-
-    // graphics
+    
+    // Graphics
     lv_display_t *disp = lcd_init();
     bsp_set_lcd_backlight(1);
     if (lvgl_lock(100)) {
@@ -550,17 +655,9 @@ void app_main(void)
         lvgl_unlock();
     }
 
-    // tasks
+    // Tasks
     xTaskCreate(encoder_read_task,    "enc",   4096, NULL, 6, NULL);
     xTaskCreate(ui_update_task,       "ui",    4096, NULL, 5, NULL);
     xTaskCreate(simplified_trial_task,"trial", STACK_SIZE, NULL, 5, NULL);
-    xTaskCreatePinnedToCore(
-    pid_task,
-    "pid",     // name
-    4096,      // stack
-    NULL,      // arg
-    /*prio=*/7, 
-    NULL,
-    /*core=*/0
-);
+    
 }

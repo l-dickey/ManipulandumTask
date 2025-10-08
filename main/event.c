@@ -26,12 +26,10 @@ static rmt_symbol_word_t      s_event_symbols[EVENT_STATE_COUNT];
 // Converting from microseconds to 0.1µs ticks (multiply by 10)
 static const uint32_t EVENT_WIDTH_TICKS[EVENT_STATE_COUNT] = {
     [INIT]     =  100000,   // 10000µs = 100000 ticks
-    [CUE_0]    =  300000,   // 30000µs = 300000 ticks
     [CUE_1]    =  400000,   // 40000µs = 400000 ticks
     [CUE_2]    =  500000,   // 50000µs = 500000 ticks
     [CUE_3]    =  600000,   // 60000µs = 600000 ticks
-    [MOVING]   =  160000,   // 16000µs = 160000 ticks
-    [REWARD_0] =  700000,   // 70000µs = 700000 ticks
+    [GO]       =  160000,   // 16000µs = 160000 ticks (formerly MOVING)
     [REWARD_1] =  800000,   // 80000µs = 800000 ticks
     [REWARD_2] =  900000,   // 90000µs = 900000 ticks
     [REWARD_3] = 1000000,   // 100000µs = 1000000 ticks

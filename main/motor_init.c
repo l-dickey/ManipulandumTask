@@ -25,7 +25,7 @@ void init_mcpwm_highres(void) {
 
     // 3) Configure MCPWM timer for 18 kHz, but 0% on startup
     mcpwm_config_t cfg = {
-        .frequency    = 18000,        // 18 kHz
+        .frequency    = 20000,        // 18 kHz
         .cmpr_a       = 50,            // ← 0% duty (motor off)
         .cmpr_b       = 50,
         .duty_mode    = MCPWM_DUTY_MODE_0,
