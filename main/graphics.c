@@ -156,6 +156,10 @@ lv_display_t* lcd_init()
     lv_init();
     // create a lvgl display
     lv_display_t *display = lv_display_create(MIPI_DSI_LCD_V_RES, MIPI_DSI_LCD_H_RES);
+
+    lv_obj_t *scr = lv_disp_get_scr_act(display);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+
     // associate the mipi panel handle to the display
     lv_display_set_user_data(display, panel_handle);
     // create draw buffer

@@ -58,6 +58,11 @@
 #define GRATING_SPACING     200  // pixels between stripes
 #define GRATING_WIDTH       120  // width of each stripe in pixels
 
+// Starting position offset for encoder indicator (move down ~2cm)
+// 2cm / 15.4cm * 1024px ≈ 133 pixels
+// At the top with defines:
+#define ENCODER_VISUAL_OFFSET  266  // Move everything down ~4cm (4cm/15.4cm * 1024px)
+#define INDICATOR_HALF_HEIGHT  25   // Half of indicator height (50px / 2)
 
 typedef enum {
     TRIAL_CORRECT = 0,
@@ -128,26 +133,30 @@ static void update_trial_display(void)
 }
 
 static inline int enc_to_screen_x(int enc_counts) {
-    const int32_t center = SCREEN_WIDTH/2;
-    const int32_t span   = SCREEN_WIDTH/2 - 25;
+    const int32_t center = SCREEN_WIDTH/2;     // 512
+    const int32_t span   = SCREEN_WIDTH/2 - 25; // 487
     int32_t pos = -enc_counts;
-    int32_t x   = center + (pos * span) / 200;
+    int32_t x   = center + ENCODER_VISUAL_OFFSET + (pos * span) / 200;  // Added offset
     if (x < 0) x = 0;
     if (x > SCREEN_WIDTH-1) x = SCREEN_WIDTH-1;
     return (int)x;
 }
-
 static void set_grating_threshold_from_counts(int threshold_counts, bool hide_left_side) {
     g_thresh_x  = enc_to_screen_x(threshold_counts);
-    g_mask_left = hide_left_side;
+    g_mask_left = true;  // CHANGED: true means gratings appear PAST threshold (right side)
 }
 
 static void draw_threshold_marker(lv_obj_t *canvas) {
     if (g_thresh_x < 0) return;
     lv_color_t green = lv_color_hex(0x00FF00);
-    // A 2-px line for visibility
-    for (int x = g_thresh_x; x <= g_thresh_x + 1 && x < SCREEN_WIDTH; x++) {
-        for (int y = 0; y < SCREEN_HEIGHT; y++) {
+    
+    // Draw threshold line 25px ABOVE encoder position (so full indicator crosses)
+    int visual_threshold = g_thresh_x - INDICATOR_HALF_HEIGHT;
+    if (visual_threshold < 0) visual_threshold = 0;
+    
+    // Draw HORIZONTAL line across entire screen
+    for (int y = 0; y < SCREEN_HEIGHT; y++) {
+        for (int x = visual_threshold; x <= visual_threshold + 2 && x < SCREEN_WIDTH; x++) {
             lv_canvas_set_px(canvas, x, y, green, LV_OPA_COVER);
         }
     }
@@ -161,7 +170,16 @@ static void render_grating(lv_obj_t *canvas, int angle_deg)
     // 1) Full black background
     lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_COVER);
 
-    // 2) Draw angled grating, clipped at g_thresh_x
+    // Calculate where the threshold will be
+    if (g_thresh_x < 0) {
+        g_thresh_x = enc_to_screen_x(ENCODER_THRESHOLD);
+    }
+    
+    // Visual threshold is 25px ABOVE actual threshold (so full indicator crosses)
+    int visual_threshold = g_thresh_x - INDICATOR_HALF_HEIGHT;
+    if (visual_threshold < 0) visual_threshold = 0;
+
+    // 2) Draw angled grating from top (X=0) down to VISUAL threshold
     float angle_rad  = (angle_deg * M_PI) / 180.0f;
     float cos_angle  = cosf(angle_rad);
     float sin_angle  = sinf(angle_rad);
@@ -196,11 +214,12 @@ static void render_grating(lv_obj_t *canvas, int angle_deg)
                 int px = (dx > dy) ? x : (x + w);
                 int py = (dx > dy) ? (y + w) : y;
 
-                if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT) {
-                    bool on_hidden_side = g_mask_left ? (px < g_thresh_x) : (px > g_thresh_x);
-                    if (!on_hidden_side) {
-                        lv_canvas_set_px(canvas, px, py, green, LV_OPA_COVER);
-                    }
+                // Grating extends from top (X=0) down to VISUAL threshold
+                // This is 25px above actual encoder threshold so full indicator crosses
+                if (px >= 0 && px <= visual_threshold &&
+                    py >= 0 && py < SCREEN_HEIGHT) {
+                    
+                    lv_canvas_set_px(canvas, px, py, green, LV_OPA_COVER);
                 }
             }
 
@@ -211,7 +230,7 @@ static void render_grating(lv_obj_t *canvas, int angle_deg)
         }
     }
     
-    // Draw threshold marker
+    // Draw threshold marker at visual position (25px above actual)
     draw_threshold_marker(canvas);
 }
 
@@ -285,19 +304,15 @@ void ui_update_task(void *pv)
         int32_t pos = 0;
         if (encoder_mutex) {
             xSemaphoreTake(encoder_mutex, portMAX_DELAY);
-            pos = current_encoder_value*-1;
+            pos = current_encoder_value;  // Don't negate yet
             xSemaphoreGive(encoder_mutex);
         }
 
-        // map pos → screen X
-        int32_t center = SCREEN_WIDTH/2;
-        int32_t span   = SCREEN_WIDTH/2 - 25;
-        int32_t x = center + (pos*span)/200;
-        if (x < 25) x = 25;
-        if (x > SCREEN_WIDTH-25) x = SCREEN_WIDTH-25;
+        // USE THE SAME MAPPING FUNCTION as the threshold!
+        int32_t x = enc_to_screen_x(pos);
 
         if (lvgl_lock(10)) {
-            lv_obj_set_x(lever_indicator, x-25);
+            lv_obj_set_x(lever_indicator, x - 25);  // Center the 50px wide indicator
             lv_timer_handler();
             lvgl_unlock();
         }
@@ -305,7 +320,6 @@ void ui_update_task(void *pv)
         vTaskDelayUntil(&next, period);
     }
 }
-
 
 static void create_simple_ui(lv_display_t *display) {
     ESP_LOGI(TAG, "Creating UI with pre-rendered gratings...");
@@ -315,7 +329,7 @@ static void create_simple_ui(lv_display_t *display) {
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
 
     // 2) Set up threshold position
-    set_grating_threshold_from_counts(ENCODER_THRESHOLD, /*hide_left_side=*/false);
+    set_grating_threshold_from_counts(ENCODER_THRESHOLD, /*hide_left_side=*/true);  // Parameter doesn't matter, always true now
     
     // 3) Create THREE separate canvas objects with separate buffers
     int angles[3] = {90, 45, 135};
@@ -337,17 +351,23 @@ static void create_simple_ui(lv_display_t *display) {
         // Hide it initially
         lv_obj_add_flag(grating_canvas[i], LV_OBJ_FLAG_HIDDEN);
     }
-    ESP_LOGI(TAG, "All gratings pre-rendered!");
+    ESP_LOGI(TAG, "All gratings pre-rendered - extend from top to encoder threshold position!");
 
-    // 4) lever indicator in center (start hidden)
+    // 4) lever indicator in center (start hidden) - position will be set by ui_update_task
     lever_indicator = lv_obj_create(scr);
     lv_obj_remove_style_all(lever_indicator);
     lv_obj_set_size(lever_indicator, 50, 200);
     lv_obj_set_style_bg_color(lever_indicator, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_opa(lever_indicator, LV_OPA_COVER, 0);
+
+    // Add black outline
+    lv_obj_set_style_border_width(lever_indicator, 6, 0);
+    lv_obj_set_style_border_color(lever_indicator, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_opa(lever_indicator, LV_OPA_COVER, 0);
+
     lv_obj_set_pos(lever_indicator,
-                   SCREEN_WIDTH/2 - 25,
-                   SCREEN_HEIGHT/2 - 100);
+                SCREEN_WIDTH/2 - 25,           // X: will be updated by ui_update_task
+                SCREEN_HEIGHT/2 - 100);        // Y: horizontal center (unchanged)
     lv_obj_add_flag(lever_indicator, LV_OBJ_FLAG_HIDDEN);
 
     // 5) trial info label at top-left
@@ -360,7 +380,6 @@ static void create_simple_ui(lv_display_t *display) {
     lv_label_set_text(trial_info_label,
         "Trial: 0\nCorrect: 0/0");
 }
-
 
 void simplified_trial_task(void *pv)
 {
@@ -644,12 +663,13 @@ void app_main(void)
     // Graphics - This will pre-render all three gratings
     ESP_LOGI(TAG, "Initializing display and pre-rendering gratings...");
     lv_display_t *disp = lcd_init();
-    bsp_set_lcd_backlight(1);
+   
     if (lvgl_lock(100)) {
         create_simple_ui(disp);
         lv_timer_handler();
         lvgl_unlock();
     }
+     bsp_set_lcd_backlight(1);
     ESP_LOGI(TAG, "Display initialized, gratings ready!");
 
     // Tasks
