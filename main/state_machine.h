@@ -24,18 +24,18 @@ typedef enum {
  * @brief Event mappings for cue states (reward types 1-3)
  */
 static const event_state_t CUE_EVENT[3] = {
-    CUE_1,   // Reward type 1
-    CUE_2,   // Reward type 2
-    CUE_3    // Reward type 3
+    CUE_0,   // Reward type 1
+    CUE_1,   // Reward type 2
+    CUE_2    // Reward type 3
 };
 
 /**
  * @brief Event mappings for reward states (reward types 1-3)
  */
 static const event_state_t REW_EVENT[3] = {
-    REWARD_1,   // Reward type 1
-    REWARD_2,   // Reward type 2
-    REWARD_3    // Reward type 3
+    REWARD_0,   // Reward type 1
+    REWARD_1,   // Reward type 2
+    REWARD_2    // Reward type 3
 };
 
 /**
