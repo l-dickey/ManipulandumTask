@@ -50,9 +50,9 @@
 #define REWARD_HOLD_MS      100
 #define RESET_THRESHOLD     5
 #define RESET_HOLD_MS       100
-#define HANDLE_EARLY_CUE_REWARD 1 // yes
 #define HIGH_TORQUE         85.0f
 #define LOW_TORQUE          5.0f
+#define PENALTY_DURATION_MS  2000
 
 // Grating parameters
 #define GRATING_SPACING     200  // pixels between stripes
@@ -66,7 +66,8 @@
 
 typedef enum {
     TRIAL_CORRECT = 0,
-    TRIAL_TIMEOUT
+    TRIAL_TIMEOUT = 1,
+    TRIAL_EARLY   = 2  // Early movement penalty
 } trial_outcome_t;
 
 // globals
@@ -94,11 +95,16 @@ static const uint32_t reward_freq = 5000;
 static void send_trial_data(trial_outcome_t outcome,
                             uint32_t reaction_time_ms,
                             int32_t encoder_position,
-                            int reward_level)  // NEW PARAMETER
+                            int reward_level)
 {
-    const char *out_str = (outcome==TRIAL_CORRECT) ? "CORRECT" : "TIMEOUT";
+    const char *out_str;
+    switch(outcome) {
+        case TRIAL_CORRECT: out_str = "CORRECT"; break;
+        case TRIAL_TIMEOUT: out_str = "TIMEOUT"; break;
+        case TRIAL_EARLY:   out_str = "EARLY"; break;
+        default:            out_str = "UNKNOWN"; break;
+    }
     
-    // NEW FORMAT: Added reward_level at the end
     printf("TRIAL,%s,%lu,%ld,%d\n",
            out_str,
            (unsigned long)reaction_time_ms,
@@ -381,6 +387,34 @@ static void create_simple_ui(lv_display_t *display) {
         "Trial: 0\nCorrect: 0/0");
 }
 
+// Completely black out the screen (penalty state)
+static void blackout_screen(void)
+{
+    if (!lvgl_lock(10)) return;
+    
+    // Hide all visual elements
+    for (int i = 0; i < 3; i++) {
+        lv_obj_add_flag(grating_canvas[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_add_flag(lever_indicator, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(trial_info_label, LV_OBJ_FLAG_HIDDEN);
+    
+    lvgl_unlock();
+}
+
+// Restore the screen after penalty (show trial info)
+static void restore_screen(void)
+{
+    if (!lvgl_lock(10)) return;
+    
+    // Show the trial info label back
+    lv_obj_clear_flag(trial_info_label, LV_OBJ_FLAG_HIDDEN);
+    
+    // Gratings and indicator will be shown as needed by the state machine
+    
+    lvgl_unlock();
+}
+
 void simplified_trial_task(void *pv)
 {
     const TickType_t loop_period = pdMS_TO_TICKS(2);  // 500 Hz
@@ -389,14 +423,15 @@ void simplified_trial_task(void *pv)
     sm_state_t   state        = S_INIT;
     TickType_t   state_ts     = next;
     TickType_t   hold_ts      = 0;
-    int          rewardType   = 0;  // Now 1-3
-    uint32_t     cue_delay_ms = 0;  // Random delay duration
+    int          rewardType   = 0;
+    uint32_t     cue_delay_ms = 0;
     bool         first_entry  = true;
     
     // Track trial outcome and timing
     trial_outcome_t trial_outcome = TRIAL_CORRECT;
     TickType_t go_start_time = 0;
     TickType_t threshold_cross_time = 0;
+    TickType_t cue_start_time = 0;  // NEW: Track when CUE started
 
     while(1) {
         TickType_t now = xTaskGetTickCount();
@@ -422,8 +457,9 @@ void simplified_trial_task(void *pv)
                 trial_outcome = TRIAL_CORRECT;
                 go_start_time = 0;
                 threshold_cross_time = 0;
+                cue_start_time = 0;
                 
-                rewardType = rand() % 3; // reward 1-3 on 0 indexing
+                rewardType = rand() % 3;
                 cue_delay_ms = CUE_DELAY_MIN_MS + 
                                (esp_random() % (CUE_DELAY_MAX_MS - CUE_DELAY_MIN_MS + 1));
                 
@@ -435,6 +471,7 @@ void simplified_trial_task(void *pv)
                 sm_enter(S_CUE, CUE_EVENT[rewardType]);
                 state     = S_CUE;
                 state_ts  = now;
+                cue_start_time = now;  // NEW: Record CUE start time
                 first_entry = true;
             }
             break;
@@ -442,30 +479,28 @@ void simplified_trial_task(void *pv)
         // ───────────── CUE ──────────────
         case S_CUE:
             if (first_entry) {
-                // Simply show the pre-rendered grating (rewardType 1-3 maps to index 0-2)
                 show_grating(rewardType);
-                
-                // Start audio
                 init_ledc(cue_freqs[rewardType]);
                 first_entry = false;
             }
 
-        #if HANDLE_EARLY_CUE_REWARD
-            // Early-response path during entire CUE period
+            // NEW: Check for EARLY movement during CUE phase
             if (pos < ENCODER_THRESHOLD) {
                 if (hold_ts == 0) hold_ts = now;
                 else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
+                    // Early movement detected!
+                    trial_outcome = TRIAL_EARLY;
                     threshold_cross_time = now;
                     
                     // Stop audio
                     ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                     ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
                     
+                    hide_all_gratings();
                     show_lever_indicator();
-                    (void)event_send_state_immediate(REW_EVENT[rewardType]);
-
-                    sm_enter_no_emit(S_REWARD);
-                    state       = S_REWARD;
+                    
+                    sm_enter(S_PENALTY, PENALTY);
+                    state       = S_PENALTY;
                     state_ts    = now;
                     first_entry = true;
                     hold_ts     = 0;
@@ -474,7 +509,6 @@ void simplified_trial_task(void *pv)
             } else {
                 hold_ts = 0;
             }
-        #endif
 
             // After CUE_TONE_MS, stop audio
             if (now - state_ts >= pdMS_TO_TICKS(CUE_TONE_MS)) {
@@ -497,20 +531,17 @@ void simplified_trial_task(void *pv)
         // ───────────── GO ────────────
         case S_GO:
             if (first_entry) {
-                // Play go cue tone
                 init_ledc(GO_CUE_FREQ);
                 show_lever_indicator();
                 first_entry = false;
             }
             
-            // Stop go cue tone after GO_CUE_MS
             if (now - state_ts >= pdMS_TO_TICKS(GO_CUE_MS)) {
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
             }
             motor_ramp_set(LOW_TORQUE, 2);
              
-            // Check for threshold crossing
             if (pos < ENCODER_THRESHOLD) {
                 if (hold_ts == 0) hold_ts = now;
                 else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
@@ -527,7 +558,6 @@ void simplified_trial_task(void *pv)
                 hold_ts = 0;
             }
             
-            // Timeout check
             if (now - state_ts > pdMS_TO_TICKS(TRIAL_TIMEOUT_MS)) {
                 trial_outcome = TRIAL_TIMEOUT;
                 threshold_cross_time = 0;
@@ -539,13 +569,13 @@ void simplified_trial_task(void *pv)
             }
             break;
 
-       // ───────────── REWARD ────────────
+        // ───────────── REWARD ────────────
         case S_REWARD: {
             static int        pulses_done;
             static bool       pin_high;
             static TickType_t last_toggle;
 
-            const int        pulses_plus_one = rewardType +1 ;
+            const int        pulses_plus_one = rewardType + 1;
             const TickType_t PHASE_MS        = pdMS_TO_TICKS(500);
 
             if (first_entry) {
@@ -586,6 +616,23 @@ void simplified_trial_task(void *pv)
             break;
         }
 
+        // ───────────── PENALTY ─────────── NEW STATE
+        case S_PENALTY:
+            if (first_entry) {
+                ESP_LOGI(TAG, "PENALTY: Early movement detected!");
+                blackout_screen();  // NEW: Turn screen completely black
+                first_entry = false;
+            }
+            
+            if (now - state_ts >= pdMS_TO_TICKS(PENALTY_DURATION_MS)) {
+                restore_screen();  // NEW: Restore trial info display
+                sm_enter(S_RESET, RESET);
+                state     = S_RESET;
+                state_ts  = now;
+                first_entry = true;
+            }
+            break;
+
         // ───────────── TIMEOUT ───────────
         case S_TIMEOUT:
             if (first_entry) {
@@ -608,6 +655,9 @@ void simplified_trial_task(void *pv)
                 uint32_t reaction_time_ms = 0;
                 if (trial_outcome == TRIAL_CORRECT && go_start_time > 0 && threshold_cross_time > 0) {
                     reaction_time_ms = pdTICKS_TO_MS(threshold_cross_time - go_start_time);
+                } else if (trial_outcome == TRIAL_EARLY && cue_start_time > 0 && threshold_cross_time > 0) {
+                    // For early trials, RT is time from cue start to early movement
+                    reaction_time_ms = pdTICKS_TO_MS(threshold_cross_time - cue_start_time);
                 }
                 
                 send_trial_data(trial_outcome, reaction_time_ms, pos, rewardType);

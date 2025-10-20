@@ -1,7 +1,6 @@
 // main/state_machine.h
 #ifndef STATE_MACHINE_H
 #define STATE_MACHINE_H
-
 #include "event.h"
 
 #ifdef __cplusplus
@@ -16,6 +15,7 @@ typedef enum {
     S_CUE,
     S_GO,          // Renamed from S_MOVING
     S_REWARD,
+    S_PENALTY,     // NEW: Penalty for early movement
     S_TIMEOUT,
     S_RESET
 } sm_state_t;
@@ -40,7 +40,7 @@ static const event_state_t REW_EVENT[3] = {
 
 /**
  * @brief Enter a new state and emit the corresponding event marker
- * 
+ *
  * @param new_state The state being entered
  * @param event The event marker to emit
  */
@@ -52,7 +52,7 @@ static inline void sm_enter(sm_state_t new_state, event_state_t event)
 /**
  * @brief Enter a new state WITHOUT emitting an event marker
  * Use when the event has already been emitted (e.g., early responses)
- * 
+ *
  * @param new_state The state being entered
  */
 static inline void sm_enter_no_emit(sm_state_t new_state)

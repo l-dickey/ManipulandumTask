@@ -35,6 +35,7 @@ static const uint32_t EVENT_WIDTH_US[EVENT_STATE_COUNT] = {
     [REWARD_0] = 70000,   // 70ms - level 0
     [REWARD_1] = 80000,   // 80ms - level 1
     [REWARD_2] = 90000,   // 90ms - level 2
+    [PENALTY]  = 130000,  // 100ms - early movement penalty
     [TIMEOUT]  = 160000,  // 160ms
     [RESET]    = 12000    // 12ms
 };
