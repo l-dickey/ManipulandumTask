@@ -35,24 +35,28 @@
 #define GPIO_REWARD_SIGNAL  3
 #define GPIO_EVENT_PIN      4
 #define ENCODER_THRESHOLD   -27
+#define EARLY_MOVEMENT_THRESHOLD -9
 #define INTERTRIAL_DELAY    500
 #define CUE_TONE_MS         500
 #define CUE_DELAY_MIN_MS    250
 #define CUE_DELAY_MAX_MS    450
 #define GO_CUE_MS           100
 #define GO_CUE_FREQ         4000
-#define TRIAL_TIMEOUT_MS    3000
-#define RESET_DELAY_MS      1000
+#define TRIAL_TIMEOUT_MS    2500
+#define RESET_DELAY_MS      1500
 #define STACK_SIZE          16384
 #define UI_TASK_PERIOD_MS   10
 #define SCREEN_WIDTH        1024
 #define SCREEN_HEIGHT       600
-#define REWARD_HOLD_MS      100
+#define REWARD_HOLD_MS      150
 #define RESET_THRESHOLD     5
 #define RESET_HOLD_MS       100
 #define HIGH_TORQUE         85.0f
 #define LOW_TORQUE          5.0f
 #define PENALTY_DURATION_MS  2000
+#define TIMEOUT_TONE_FREQ   100   // Hz for timeout
+#define PENALTY_TONE_FREQ   200   // Hz penalty  
+#define OUTCOME_TONE_MS     500   // Duration for timeout/penalty tones
 
 // Grating parameters
 #define GRATING_SPACING     200  // pixels between stripes
@@ -485,7 +489,7 @@ void simplified_trial_task(void *pv)
             }
 
             // NEW: Check for EARLY movement during CUE phase
-            if (pos < ENCODER_THRESHOLD) {
+            if (pos < EARLY_MOVEMENT_THRESHOLD) {
                 if (hold_ts == 0) hold_ts = now;
                 else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
                     // Early movement detected!
@@ -540,7 +544,7 @@ void simplified_trial_task(void *pv)
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
             }
-            motor_ramp_set(LOW_TORQUE, 2);
+            motor_ramp_set(LOW_TORQUE, 50);
              
             if (pos < ENCODER_THRESHOLD) {
                 if (hold_ts == 0) hold_ts = now;
@@ -616,29 +620,45 @@ void simplified_trial_task(void *pv)
             break;
         }
 
-        // ───────────── PENALTY ─────────── NEW STATE
+        
+        // ───────────── PENALTY ─────────── 
         case S_PENALTY:
             if (first_entry) {
                 ESP_LOGI(TAG, "PENALTY: Early movement detected!");
-                blackout_screen();  // NEW: Turn screen completely black
+                blackout_screen();           // Turn screen completely black
+                init_ledc(PENALTY_TONE_FREQ); // Play 200Hz penalty tone
                 first_entry = false;
             }
             
+            // Stop tone after OUTCOME_TONE_MS
+            if (now - state_ts >= pdMS_TO_TICKS(OUTCOME_TONE_MS)) {
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+            }
+            
+            // Remain in penalty for full PENALTY_DURATION_MS
             if (now - state_ts >= pdMS_TO_TICKS(PENALTY_DURATION_MS)) {
-                restore_screen();  // NEW: Restore trial info display
+                restore_screen();  // Restore trial info display
                 sm_enter(S_RESET, RESET);
                 state     = S_RESET;
                 state_ts  = now;
                 first_entry = true;
             }
             break;
-
         // ───────────── TIMEOUT ───────────
         case S_TIMEOUT:
             if (first_entry) {
+                init_ledc(TIMEOUT_TONE_FREQ);  // Play 100Hz timeout tone
                 first_entry = false;
             }
             
+            // Check if we should stop the tone
+            if (now - state_ts >= pdMS_TO_TICKS(OUTCOME_TONE_MS)) {
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+            }
+            
+            // Original transition logic - stay for 500ms total
             if (now - state_ts >= pdMS_TO_TICKS(500)) {
                 sm_enter(S_RESET, RESET);
                 state     = S_RESET;
@@ -663,7 +683,7 @@ void simplified_trial_task(void *pv)
                 send_trial_data(trial_outcome, reaction_time_ms, pos, rewardType);
                 update_trial_display();
                 
-                motor_ramp_set(HIGH_TORQUE, 100);
+                motor_ramp_set(HIGH_TORQUE, 200);
                 first_entry = false;
             }
             
