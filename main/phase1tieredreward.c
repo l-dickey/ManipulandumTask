@@ -463,7 +463,7 @@ void simplified_trial_task(void *pv)
                 threshold_cross_time = 0;
                 cue_start_time = 0;
                 
-                rewardType = rand() % 3;
+                rewardType = (esp_random() / (UINT32_MAX / 3));  // Division method
                 cue_delay_ms = CUE_DELAY_MIN_MS + 
                                (esp_random() % (CUE_DELAY_MAX_MS - CUE_DELAY_MIN_MS + 1));
                 
@@ -488,32 +488,25 @@ void simplified_trial_task(void *pv)
                 first_entry = false;
             }
 
-            // NEW: Check for EARLY movement during CUE phase
+            // NEW CODE - immediate penalty on any violation
             if (pos < EARLY_MOVEMENT_THRESHOLD) {
-                if (hold_ts == 0) hold_ts = now;
-                else if (now - hold_ts >= pdMS_TO_TICKS(REWARD_HOLD_MS)) {
-                    // Early movement detected!
-                    trial_outcome = TRIAL_EARLY;
-                    threshold_cross_time = now;
-                    
-                    // Stop audio
-                    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-                    
-                    hide_all_gratings();
-                    show_lever_indicator();
-                    
-                    sm_enter(S_PENALTY, PENALTY);
-                    state       = S_PENALTY;
-                    state_ts    = now;
-                    first_entry = true;
-                    hold_ts     = 0;
-                    break;
-                }
-            } else {
-                hold_ts = 0;
+                // Early movement detected - immediate penalty!
+                trial_outcome = TRIAL_EARLY;
+                threshold_cross_time = now;
+                
+                // Stop audio
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+                
+                hide_all_gratings();
+                show_lever_indicator();
+                
+                sm_enter(S_PENALTY, PENALTY);
+                state       = S_PENALTY;
+                state_ts    = now;
+                first_entry = true;
+                break;
             }
-
             // After CUE_TONE_MS, stop audio
             if (now - state_ts >= pdMS_TO_TICKS(CUE_TONE_MS)) {
                 ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
